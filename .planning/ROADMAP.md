@@ -28,7 +28,15 @@ The demo is built as six horizontal technical layers, in dependency order: a fou
   2. A single organization root is generated at setup, AXIAM imports it (BYOK), issues one tenant signing CA per tenant, and Chromium/Firefox trust Caddy's offline-signed SAN certs without warnings once the root is imported (PKI-01, PKI-02, PKI-03, PKI-04, PKI-05, PKI-06).
   3. All browser-facing traffic is reachable through a single Caddy origin proxying to AXIAM, and the AXIAM resource tree (portfolio → site → common/building → apartment → device) plus the group-per-(role, resource) pattern exist and are queryable via the AXIAM API (PLAT-06, AUTHZ-01, AUTHZ-02).
   4. A single test device authenticates to AXIAM over mTLS, receives a JWT, and connects to the `domo` MQTT vhost using cert + JWT, validated end-to-end by a working RabbitMQ HTTP auth backend (MQTT-01, MQTT-02).
-**Plans**: TBD
+**Plans**: 7 plans (4 waves)
+Plans:
+- [ ] 01-01-PLAN.md — Tracer: offline root → AXIAM BYOK import → tenant CA → device cert → mTLS login → accepted MQTT CONNECT (wave 1)
+- [ ] 01-02-PLAN.md — Whole-chain PKI verification, root export and trust docs, secrets guard (wave 2)
+- [ ] 01-03-PLAN.md — Caddy single origin, AXIAM console host, landing page, PostgreSQL (wave 2)
+- [ ] 01-04-PLAN.md — AuthZ catalog, per-tenant admin, signing CAs, service credentials, resource tree and group pattern (wave 2)
+- [ ] 01-05-PLAN.md — Device Twin RabbitMQ auth backend: full four-endpoint contract with offline test suite (wave 2)
+- [ ] 01-06-PLAN.md — Smoke: live authorization assertions and the positive/negative device connect matrix (wave 3)
+- [ ] 01-07-PLAN.md — Preflight, staged resumable checklist, demo-reset, arm64 images, phase verification and demo card (wave 4)
 
 ### Phase 2: Management Platform
 **Goal**: Property managers can fully manage their tenant's structure, staff, devices and installer grants, with every change mirrored into AXIAM, and seed data stands up two realistic tenants.
@@ -97,7 +105,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/TBD | Not started | - |
+| 1. Foundation | 0/7 | Planned | - |
 | 2. Management Platform | 0/TBD | Not started | - |
 | 3. Device Twin + MQTT | 0/TBD | Not started | - |
 | 4. Simulators | 0/TBD | Not started | - |
