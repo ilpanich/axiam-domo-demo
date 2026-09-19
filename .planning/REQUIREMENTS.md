@@ -197,11 +197,104 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |---|---|---|
+| PLAT-01 | Phase 1 | Pending |
+| PLAT-02 | Phase 1 | Pending |
+| PLAT-03 | Phase 6 | Pending |
+| PLAT-04 | Phase 4 | Pending |
+| PLAT-05 | Phase 1 | Pending |
+| PLAT-06 | Phase 1 | Pending |
+| PKI-01 | Phase 1 | Pending |
+| PKI-02 | Phase 1 | Pending |
+| PKI-03 | Phase 1 | Pending |
+| PKI-04 | Phase 1 | Pending |
+| PKI-05 | Phase 1 | Pending |
+| PKI-06 | Phase 1 | Pending |
+| AUTH-01 | Phase 5 | Pending |
+| AUTH-02 | Phase 5 | Pending |
+| AUTH-03 | Phase 5 | Pending |
+| AUTH-04 | Phase 5 | Pending |
+| AUTH-05 | Phase 5 | Pending |
+| AUTH-06 | Phase 2 | Pending |
+| AUTHZ-01 | Phase 1 | Pending |
+| AUTHZ-02 | Phase 1 | Pending |
+| AUTHZ-03 | Phase 3 | Pending |
+| AUTHZ-04 | Phase 3 | Pending |
+| AUTHZ-05 | Phase 3 | Pending |
+| AUTHZ-06 | Phase 3 | Pending |
+| AUTHZ-07 | Phase 3 | Pending |
+| AUTHZ-08 | Phase 2 | Pending |
+| MGMT-01 | Phase 2 | Pending |
+| MGMT-02 | Phase 2 | Pending |
+| MGMT-03 | Phase 2 | Pending |
+| MGMT-04 | Phase 2 | Pending |
+| MGMT-05 | Phase 2 | Pending |
+| MGMT-06 | Phase 2 | Pending |
+| MGMT-07 | Phase 2 | Pending |
+| DEV-01 | Phase 2 | Pending |
+| DEV-02 | Phase 2 | Pending |
+| DEV-03 | Phase 2 | Pending |
+| DEV-04 | Phase 2 | Pending |
+| DEV-05 | Phase 2 | Pending |
+| DEV-06 | Phase 4 | Pending |
+| DEV-07 | Phase 2 | Pending |
+| DEV-08 | Phase 5 | Pending |
+| TWIN-01 | Phase 3 | Pending |
+| TWIN-02 | Phase 3 | Pending |
+| TWIN-03 | Phase 3 | Pending |
+| TWIN-04 | Phase 3 | Pending |
+| TWIN-05 | Phase 3 | Pending |
+| TWIN-06 | Phase 3 | Pending |
+| TWIN-07 | Phase 3 | Pending |
+| TWIN-08 | Phase 3 | Pending |
+| TWIN-09 | Phase 3 | Pending |
+| MQTT-01 | Phase 1 | Pending |
+| MQTT-02 | Phase 1 | Pending |
+| MQTT-03 | Phase 3 | Pending |
+| MQTT-04 | Phase 3 | Pending |
+| MQTT-05 | Phase 3 | Pending |
+| GRANT-01 | Phase 2 | Pending |
+| GRANT-02 | Phase 3 | Pending |
+| GRANT-03 | Phase 2 | Pending |
+| GRANT-04 | Phase 2 | Pending |
+| GRANT-05 | Phase 2 | Pending |
+| ICOM-01 | Phase 5 | Pending |
+| ICOM-02 | Phase 3 | Pending |
+| ICOM-03 | Phase 5 | Pending |
+| ICOM-04 | Phase 5 | Pending |
+| ICOM-05 | Phase 3 | Pending |
+| SIM-01 | Phase 4 | Pending |
+| SIM-02 | Phase 4 | Pending |
+| SIM-03 | Phase 4 | Pending |
+| SIM-04 | Phase 4 | Pending |
+| SIM-05 | Phase 4 | Pending |
+| SIM-06 | Phase 4 | Pending |
+| SIM-07 | Phase 5 | Pending |
+| UI-01 | Phase 5 | Pending |
+| UI-02 | Phase 5 | Pending |
+| UI-03 | Phase 5 | Pending |
+| UI-04 | Phase 5 | Pending |
+| UI-05 | Phase 5 | Pending |
+| UI-06 | Phase 5 | Pending |
+| UI-07 | Phase 5 | Pending |
+| UI-08 | Phase 5 | Pending |
+| FEED-01 | Phase 3 | Pending |
+| FEED-02 | Phase 5 | Pending |
+| FEED-03 | Phase 5 | Pending |
+| SEED-01 | Phase 2 | Pending |
+| SEED-02 | Phase 2 | Pending |
+| SEED-03 | Phase 4 | Pending |
+| DOC-01 | Phase 6 | Pending |
+| DOC-02 | Phase 6 | Pending |
+| DOC-03 | Phase 6 | Pending |
+| DOC-04 | Phase 6 | Pending |
+| DOC-05 | Phase 6 | Pending |
+| QUAL-01 | Phase 6 | Pending |
+| QUAL-02 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 93 total
-- Mapped to phases: 0 (pending roadmap)
+- Mapped to phases: 93/93 (100%)
 
 ---
 *Requirements defined: 2026-09-19*
-*Last updated: 2026-09-19 after initial definition*
+*Last updated: 2026-09-19 after roadmap creation (6-phase horizontal-layer structure)*
