@@ -118,7 +118,17 @@ If anything else slips, these must still work on both reference machines.
   - Rust-WASM (`axiam-sdk-wasm`): browser `loginOpaque` and `can()`.
   - C and C++: REST only via libcurl, mTLS device login.
   - There is no gRPC-web, so browsers talk REST.
-- **Dev stack:** SurrealDB, RabbitMQ 4 (AMQPS), optional Vault, `axiam-server` on :8090. AXIAM already documents a Raspberry Pi 5 deployment (`docs/deployment/rpi5-k3s.md`, which says 8 GB is needed with k3s).
+- **Role assignment limit:** `has_role` is **UNIQUE(subject, role)**, so a subject can hold a given named role at only one resource scope. This demo therefore assigns roles to **groups, one per (role, resource) pair**, and users join or leave via `member_of`.
+- **PKI:**
+  - An organization root can be imported with its key (BYOK).
+  - **Tenant signing CAs** (intermediates with `tenant_id` + `parent_ca_id`) issue tenant leaves.
+  - AXIAM-issued leaves carry **no SAN, KU or EKU**, and `sign-csr` refuses CSRs that request them.
+  - Device certs **must be bound** to their service account (`bind-certificate`). The docs say this isn't needed, but the code requires it.
+  - There is no CRL or OCSP.
+- **Tokens:**
+  - Device mTLS login returns only an access token (900 s); there is no refresh token.
+  - The authorization decision cache is off by default, and access tokens carry no permissions, so a revoke takes effect on the next check.
+- **Dev stack:** SurrealDB, RabbitMQ 4 (AMQPS), optional Vault, `axiam-server` on :8090. AXIAM images are already multi-arch. AXIAM also documents a Raspberry Pi 5 deployment (`docs/deployment/rpi5-k3s.md`, which says 8 GB is needed with k3s).
 - **Seed tooling:** `scripts/e2e-bootstrap.sh` and the curl walkthroughs in `examples/b1-*` and `examples/b6-*` are templates. There is no demo seed tool.
 
 ### Architecture
@@ -152,12 +162,12 @@ If anything else slips, these must still work on both reference machines.
 
 | Component | Language / stack | Owns | Talks to AXIAM via |
 |---|---|---|---|
-| Management Platform | Java 21, Spring Boot 3, Java SDK | Tenant domain (sites, buildings, apartments, device registry, memberships, installer grants). Mirrors the domain into AXIAM resources and role assignments. Device cert issuance (signs CSRs through AXIAM PKI) | REST for provisioning, using an org-scope service account over mTLS. gRPC `CheckAccess` on every user request, forwarding the user's token |
-| Device Twin | Rust (edition 2024), Actix-web, Rust SDK | Device shadows (reported/desired), command dispatch, MQTT bridge, SSE streams for UIs, access decision feed | gRPC `CheckAccess` with the user's token for user commands. REST `check_as` (Twin service account) for device-originated actions such as intercom calls |
+| Management Platform | Java 21, **Spring Boot 4.1.x** (required by the Java SDK's Spring integration), jOOQ, Flyway, Java SDK | Tenant domain (sites, buildings, apartments, device registry, memberships, installer grants). Mirrors the domain into AXIAM resources and role assignments. Device cert issuance (signs CSRs through AXIAM PKI) | REST for provisioning, using an org-scope service account over mTLS. gRPC `CheckAccess` on every user request, forwarding the user's token |
+| Device Twin | Rust (edition 2024), Actix-web, sqlx, rumqttc + rustls, Rust SDK | Device shadows (reported/desired), command dispatch, MQTT bridge, SSE streams for UIs, access decision feed. Also the **RabbitMQ HTTP auth backend**: validates device JWTs with AXIAM, checks that the subject matches the cert, and authorizes topics | gRPC `CheckAccess` with the user's token for user commands. REST `check_as` (Twin service account) for device-originated actions such as intercom calls |
 | Staff console / Resident app / Sim control | React + TypeScript + Vite, pnpm workspace with a shared package | UI only | `axiam-sdk-wasm`: `loginOpaque` and `can()` for UI gating. Real enforcement is always server-side |
 | Simulator hosts | C (lights), C++ (intercoms), Rust (thermostats) | Virtual device behavior and a local control API | REST: mTLS `auth/device` per virtual device. The host itself uses a service account to fetch its device assignments |
-| PostgreSQL | 16+ | Management and Twin databases (one instance, two schemas) | — |
-| RabbitMQ | AXIAM's instance | The `domo` vhost with the MQTT plugin for device traffic | — |
+| PostgreSQL | **17** (not 18: open Flyway/Boot 4 issue) | Management and Twin databases (one instance, two schemas) | — |
+| RabbitMQ | AXIAM's instance (4.2.x) | The `domo` vhost with the MQTT plugin for device traffic. Auth goes through `rabbitmq_auth_backend_http`, served by the Twin | — |
 
 ### Authorization model (AXIAM resources and roles, per tenant)
 
@@ -174,6 +184,10 @@ portfolio:{tenant}                          (root)
 ```
 
 Devices sit under a **common-area** node or an apartment node, never directly under a site or building. Operate permissions are granted only on common-area nodes and on individual apartments or devices. As a result, cascading can never leak "operate" into apartments, and **no deny rules are needed**. A deny would also block installer grants, because deny wins at any depth.
+
+**Group indirection.** AXIAM allows a subject to hold a given role at only one scope. So every row below is realized as an AXIAM **group per (role, resource)**, e.g. `installer@site:123` or `granted-operator@device:xyz`. The group holds the role scoped to that resource, and users are added or removed as members. For example, an installer on two sites is a member of two groups, and a grant or revoke is a membership change.
+
+Permissions are enumerated per action; `structure:*` below is shorthand, because AXIAM has no wildcard. Deny rules are **never** used above apartment or device nodes.
 
 | Role | Assigned on | Permissions (actions) |
 |---|---|---|
@@ -196,13 +210,18 @@ Tenant isolation comes from AXIAM tenants: each property-management company is i
    5. Every decision is appended to the decision feed.
 2. **Resident grants an installer:**
    1. The resident app calls the Management Platform `POST /apartments/{id}/grants {installerId, deviceIds[]}`.
-   2. The Management Platform checks `grant:manage` on the apartment and creates `granted-operator` role assignments in AXIAM.
-   3. The installer's next command succeeds. On revoke the assignments are deleted and the next command is denied (`no_grant`).
-3. **Device provisioning:**
+   2. The Management Platform checks `grant:manage` on the apartment. It then adds the installer to each device's `granted-operator@device:{id}` group, creating the group on first use.
+   3. The installer's next command succeeds. On revoke the membership is removed and the next command is denied (`no_grant`).
+3. **Device provisioning** (one atomic step):
    1. A property manager, installer or resident adds a device, and the Management Platform creates the AXIAM resource and service account.
-   2. The simulator host polls its assignments, generates a keypair and CSR, and gets the cert signed through the Management Platform → AXIAM PKI. **Private keys never leave the simulator host.**
-   3. The device logs in via mTLS `auth/device` and connects to MQTT.
-4. **Intercom call:**
+   2. The simulator host polls its assignments, generates a keypair and CSR, and gets the cert signed through the Management Platform → AXIAM `sign-csr` with the **tenant signing CA**. **Private keys never leave the simulator host.**
+   3. The Management Platform **binds** the cert to the device's service account.
+4. **Device connect:**
+   1. The device logs in via SDK mTLS `auth/device` and receives a 15-minute JWT.
+   2. It connects to MQTT over mTLS with the **JWT as the password**.
+   3. The Twin's HTTP auth backend validates the JWT with AXIAM, checks that the token subject matches the cert identity, and authorizes topics under `domo/{tenant}/{device}/…`.
+   4. Hosts re-authenticate each device proactively, with jitter, before expiry. There's no refresh token, and reconnects need a fresh JWT.
+5. **Intercom call:**
    1. The control panel tells the outdoor intercom host to ring apartment X, and the outdoor device publishes a `call` event.
    2. The Twin checks `intercom:call` for that device via `check_as` and routes an `incoming_call` command to apartment X's indoor intercom.
    3. The resident app rings (SSE). The resident answers (operating the indoor intercom) and then unlocks (operating the outdoor intercom). Both are checked with the resident's token.
@@ -211,7 +230,7 @@ Tenant isolation comes from AXIAM tenants: each property-management company is i
 
 The platform must fit comfortably in **8 GB on the Raspberry Pi 5**. The target is **≤ 4 GB** total resident memory with the demo running:
 - JVM heap capped at about 512 MB.
-- A single PostgreSQL instance and AXIAM's single RabbitMQ.
+- A single PostgreSQL instance and AXIAM's single RabbitMQ. No Vault: AXIAM's CA keys stay in its default database custody.
 - Static portals served by Caddy.
 - No per-device containers.
 - All images are built multi-arch (`linux/amd64`, `linux/arm64`).
@@ -234,7 +253,13 @@ The platform must fit comfortably in **8 GB on the Raspberry Pi 5**. The target 
   - mTLS wherever AXIAM verifies it (REST device and service login; MQTT to the broker).
   - Reason: the user chose "use what exists + log gaps".
 - **Local, LAN-only:** there is no internet exposure.
-- **All trust is anchored in the AXIAM organization CA.** Every certificate in the demo is issued by the AXIAM PKI: server certs for Caddy, AXIAM, RabbitMQ, PostgreSQL, the Management Platform and the Device Twin; client certs for services, simulator hosts and devices. No second CA exists. Browsers and client machines trust the exported AXIAM root. Reason: the user wants everything bound to the AXIAM CA, which also means more PKI dogfooding.
+- **All trust is anchored in the AXIAM organization root.** There is a single trust anchor and no second CA.
+  - Setup generates the root, and AXIAM imports it with its key (BYOK).
+  - AXIAM issues one **tenant signing CA** per tenant.
+  - Every device and service client cert is issued by AXIAM from a tenant CA.
+  - Server certs (Caddy, AXIAM, RabbitMQ, PostgreSQL, Management Platform, Twin) need SANs, which AXIAM cannot issue. They are signed by the same root, **offline at setup**.
+  - Browsers and client machines trust the exported root.
+  - Reason: the user wants everything bound to the AXIAM CA. The missing SAN/KU/EKU support is logged as an AXIAM improvement.
 - **Disk hygiene:** clean build outputs after each component build. Reason: the user's machine has run out of disk mid-session before.
 
 ## Key Decisions
@@ -256,16 +281,23 @@ The platform must fit comfortably in **8 GB on the Raspberry Pi 5**. The target 
 | Property managers **can operate** common-area devices, and never apartment devices | The spec only states manage rights and the apartment ban; the user confirmed this reading | — Pending |
 | *Configure* = device settings (thermostat limits, intercom → apartment mapping, light groups). *Operate* = runtime commands | Separates installer setup work from the operate ban on apartment devices; the user confirmed this | — Pending |
 | A resident may grant access only to **installers assigned to the resident's site** | Keeps grants within the property's own staff; the user confirmed this | — Pending |
-| **Every certificate is issued by the AXIAM organization CA**, server TLS included. No separate demo CA | The user's choice: everything is bound to AXIAM trust, and the PKI gets more dogfooding | — Pending |
-| Broker topic authorization (RabbitMQ OAuth2 backend with AXIAM JWTs, or an HTTP auth backend in the Twin) is **decided in phase research** | Depends on AXIAM token claims; whichever works without changing AXIAM wins. The user agreed to defer it | — Pending |
+| **One trust anchor, the AXIAM org root:** the root is imported (BYOK) and AXIAM issues per-tenant signing CAs, which issue the client certs; SAN server certs are signed offline by the same root | The user's choice. AXIAM leaves can't carry SAN/KU/EKU, which browsers and rustls need; the gap is logged as an AXIAM improvement | — Pending |
+| Broker auth via **`rabbitmq_auth_backend_http` served by the Device Twin**; the OAuth2 backend is not used | AXIAM's `scope` claim is free-form, not RabbitMQ's permission grammar (research finding) | — Pending |
+| Devices connect to MQTT with **mTLS cert + AXIAM JWT as the password**, and the hook checks that the subject matches the cert | The user's choice. AXIAM itself authenticates each device through the SDKs, as the spec requires; a stolen token is useless without the device key | — Pending |
+| Roles are assigned through **one AXIAM group per (role, resource)**; users join via `member_of` | AXIAM's `has_role` is UNIQUE(subject, role), a forced research finding | — Pending |
+| Device certs are always **bound** to their service account after `sign-csr` | Required by AXIAM's code despite what the docs say (logged as a dogfooding finding) | — Pending |
+| **Spring Boot 4.1.x**, **PostgreSQL 17**, **no Vault** | SDK compatibility, an open PG18 issue, and the memory budget (research findings) | — Pending |
+| Device re-authentication is **proactive and jittered** | There's no refresh token and the TTL is 900 s; this avoids reconnect storms across 114 devices | — Pending |
 
 ### TLS bootstrap implication
 
-AXIAM must be running before its CA exists, so setup has two stages:
-1. AXIAM starts with a temporary bootstrap certificate, bound to localhost only.
-2. Setup creates the org CA and issues server certs for AXIAM, Caddy, RabbitMQ, PostgreSQL, the Management Platform and the Twin. It then restarts those services on the AXIAM-issued certs and exports the root for browsers and the simulator PC.
+AXIAM must be running before any AXIAM-issued certificate exists, so setup has stages:
+1. Generate the org root offline. Sign the SAN server certs for AXIAM, Caddy, RabbitMQ, PostgreSQL, the Management Platform and the Twin with it.
+2. Start AXIAM on its server cert and import the root with its key (BYOK). Create one tenant signing CA per tenant.
+3. Issue service client certs through AXIAM. Start everything else, since AXIAM hot-reloads its trust anchors and Caddy reloads gracefully.
+4. Export the root for browsers and the simulator PC.
 
-`just demo-reset` repeats the whole sequence. Anything that goes wrong in this process is recorded in the dogfooding findings.
+`just demo-reset` repeats the sequence. The root key lives only in a setup-owned secrets directory that is never committed. Anything that goes wrong in this process is recorded in the dogfooding findings.
 
 ## Evolution
 
@@ -285,4 +317,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-19 after initialization (approved by user)*
+*Last updated: 2026-09-19 after project research (corrections plus user decisions on PKI and MQTT auth)*
