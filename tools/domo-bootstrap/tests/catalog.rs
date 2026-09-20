@@ -172,6 +172,104 @@ fn group_templates_name_the_eager_roles_per_resource_type() {
     );
 }
 
+/// The catalog actually shipped, not a fixture. Guards the eight names three
+/// later phases resolve through.
+const SHIPPED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../authz/catalog.toml"
+));
+
+#[test]
+fn the_shipped_catalog_declares_the_eight_roles_of_d16() {
+    let catalog = catalog::parse(SHIPPED).expect("the shipped catalog must be valid");
+
+    let mut names: Vec<&str> = catalog.roles.iter().map(|r| r.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "common-device-manager",
+            "common-operator",
+            "concierge",
+            "device-self",
+            "granted-operator",
+            "installer",
+            "property-manager",
+            "resident",
+        ],
+        "exactly the eight roles D-16 names"
+    );
+
+    for role in &catalog.roles {
+        assert!(
+            !role.description.trim().is_empty(),
+            "role '{}' has a description",
+            role.name
+        );
+        assert!(
+            !role.permissions.is_empty(),
+            "role '{}' enumerates its permissions",
+            role.name
+        );
+    }
+}
+
+#[test]
+fn no_staff_role_in_the_shipped_catalog_can_operate_a_device() {
+    // The first of the four demo moments: no property manager, concierge or
+    // installer may operate an apartment's devices. `concierge` reaches
+    // `device:operate` only through `common-operator`, which is scoped to a
+    // common area and can therefore never reach inside an apartment.
+    let catalog = catalog::parse(SHIPPED).expect("the shipped catalog must be valid");
+
+    for staff in ["property-manager", "installer", "concierge"] {
+        let role = catalog
+            .roles
+            .iter()
+            .find(|r| r.name == staff)
+            .unwrap_or_else(|| panic!("role '{staff}' exists"));
+        assert!(
+            !role.permissions.iter().any(|p| p == "device:operate"),
+            "'{staff}' must not grant device:operate directly"
+        );
+    }
+}
+
+#[test]
+fn the_shipped_catalog_contains_no_wildcard_anywhere() {
+    // Belt and braces with the `just` grep: this one also sees a wildcard that
+    // survives inside a value the grep's comment filter might skip.
+    for (n, line) in SHIPPED.lines().enumerate() {
+        let code = line.split('#').next().unwrap_or("");
+        assert!(
+            !code.contains('*'),
+            "line {} of authz/catalog.toml contains a wildcard: {line}",
+            n + 1
+        );
+    }
+}
+
+#[test]
+fn the_shipped_group_templates_match_d21() {
+    let catalog = catalog::parse(SHIPPED).expect("the shipped catalog must be valid");
+
+    assert_eq!(catalog.roles_for("portfolio"), vec!["property-manager"]);
+    assert_eq!(catalog.roles_for("site"), vec!["installer", "concierge"]);
+    assert_eq!(
+        catalog.roles_for("common"),
+        vec!["common-operator", "common-device-manager"]
+    );
+    assert_eq!(catalog.roles_for("apartment"), vec!["resident"]);
+    assert!(
+        catalog.roles_for("device").is_empty(),
+        "a device's grant group is created lazily in Phase 2 (D-21)"
+    );
+    assert!(
+        catalog.roles_for("building").is_empty(),
+        "a building's devices live under its common node; the site binding cascades"
+    );
+}
+
 #[test]
 fn a_group_template_naming_an_undefined_role_is_refused() {
     let src = format!(

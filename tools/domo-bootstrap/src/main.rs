@@ -62,6 +62,15 @@ enum Stage {
     },
     /// Create the `domo` MQTT vhost, touching no other vhost.
     Broker,
+    /// Apply `authz/catalog.toml` to one tenant (D-16).
+    Catalog {
+        /// Tenant slug to apply the catalog to.
+        #[arg(long)]
+        tenant: String,
+        /// Report what would change and write nothing.
+        #[arg(long)]
+        plan_only: bool,
+    },
 }
 
 #[tokio::main]
@@ -91,5 +100,8 @@ async fn main() -> Result<()> {
             stages::device_identity::sign(&csr, &out, &tenant).await
         }
         Stage::Broker => stages::broker::run().await,
+        Stage::Catalog { tenant, plan_only } => {
+            stages::catalog::run(&tenant, plan_only).await
+        }
     }
 }

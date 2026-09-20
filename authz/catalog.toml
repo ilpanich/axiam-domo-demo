@@ -1,0 +1,246 @@
+# AXIAM Domo Demo — the role and permission catalog (D-16).
+#
+# This file is the authorization model. `domo-bootstrap` applies it to every
+# tenant identically and idempotently; the Management Platform (Phase 2) and
+# the Device Twin (Phase 3) create resources and groups AGAINST it and never
+# define a role or a permission of their own.
+#
+# Three rules govern what may be written here.
+#
+# 1. There is no wildcard. AXIAM has none, so `structure:*` in PROJECT.md is
+#    shorthand for a human reader and must appear below as the individual
+#    `resource:verb` pairs it stands for. `domo-bootstrap` refuses a catalog
+#    containing `*`, `?` or `%` before it makes its first request.
+#
+# 2. There is no deny. The model is permit-by-group-membership over a
+#    hierarchy: devices hang off common-area nodes or apartments, never
+#    directly off a site or building, so an operate grant can never cascade
+#    into an apartment and no deny is needed to stop it. A deny would also
+#    break the resident-to-installer grant outright — AXIAM's RBAC engine is
+#    deny-override at every depth, so a deny above an apartment would beat the
+#    grant that the demo exists to show.
+#
+# 3. A role is never held directly. AXIAM lets a subject hold a role at one
+#    scope only, so every (role, resource) pair below is realised as a GROUP —
+#    `installer@site:lakeside-park` — that holds the role scoped to that
+#    resource. Granting and revoking are then membership changes. The
+#    `[[group_template]]` blocks at the end say which of those groups are
+#    created eagerly with a resource; a device's `granted-operator` group is
+#    created lazily, on the first grant, in Phase 2.
+#
+# These names are a contract across three phases. Renaming one means a
+# coordinated change in the Management Platform, the Twin and every smoke
+# assertion at once.
+
+version = 1
+
+# Consumed by `tools/domo-bootstrap/src/naming.rs` and by Phase 2, so the
+# group naming scheme has exactly one source (D-17).
+group_pattern = "{role}@{type}:{slug}"
+
+# -----------------------------------------------------------------------------
+# Permissions — the actions. Tenant-wide; what binds one to a place in the tree
+# is the resource a role's group binding is scoped to.
+# -----------------------------------------------------------------------------
+
+# Structure. PROJECT.md writes this set as `structure:*`; expanded here.
+[[permission]]
+action = "structure:create"
+description = "Create a site, building, common area or apartment"
+
+[[permission]]
+action = "structure:read"
+description = "List and read sites, buildings, common areas and apartments"
+
+[[permission]]
+action = "structure:update"
+description = "Rename or re-parent a site, building, common area or apartment"
+
+[[permission]]
+action = "structure:delete"
+description = "Delete a site, building, common area or apartment"
+
+[[permission]]
+action = "member:assign"
+description = "Add a user to, or remove a user from, a structural group"
+
+# Devices. `device:manage` in PROJECT.md's roles table is the create/read/
+# update/delete set, expanded here so no reader has to know that.
+[[permission]]
+action = "device:create"
+description = "Register a device and its service account"
+
+[[permission]]
+action = "device:read"
+description = "List devices and read their registry entry and shadow state"
+
+[[permission]]
+action = "device:update"
+description = "Edit a device's registry entry"
+
+[[permission]]
+action = "device:delete"
+description = "Remove a device from the registry"
+
+[[permission]]
+action = "device:configure"
+description = "Change a device's configuration — its settings, not its state"
+
+[[permission]]
+action = "device:operate"
+description = "Command a device: switch a light, set a setpoint, answer or open an intercom"
+
+# Grants (GRANT-01, GRANT-02).
+[[permission]]
+action = "grant:manage"
+description = "Grant or revoke an installer's access to a device in one's own apartment"
+
+# Device-side actions, held by a device's own service account.
+[[permission]]
+action = "twin:report"
+description = "Publish reported state to the Device Twin"
+
+[[permission]]
+action = "command:receive"
+description = "Receive commands addressed to this device"
+
+[[permission]]
+action = "intercom:call"
+description = "Place an intercom call to an apartment in the scoped building or site"
+
+# -----------------------------------------------------------------------------
+# Roles. Each is bound to a group scoped to one resource; none is global.
+# -----------------------------------------------------------------------------
+
+# STRUCT-01, USER-01. Administers the portfolio: sites, buildings, apartments
+# and the people assigned to them. Deliberately holds NO device:operate — a
+# property manager cannot operate an apartment's devices, which is the first of
+# the four demo moments. Operating and managing common-area devices comes from
+# membership of the `common-operator` and `common-device-manager` groups the
+# Management Platform creates on every common node.
+[[role]]
+name = "property-manager"
+description = "Administers sites, buildings, apartments and their users"
+permissions = [
+    "structure:create",
+    "structure:read",
+    "structure:update",
+    "structure:delete",
+    "member:assign",
+    "device:read",
+]
+
+# DEV-01, DEV-03. Adds, edits, deletes and configures devices at site and
+# building level; the site-level binding cascades to the buildings beneath it.
+# Reaches an apartment's devices only through a resident's grant, which is a
+# membership of that device's `granted-operator` group — never through this
+# role. Note the absence of device:operate here too.
+[[role]]
+name = "installer"
+description = "Installs, configures and maintains devices at site and building level"
+permissions = [
+    "device:create",
+    "device:read",
+    "device:update",
+    "device:delete",
+    "device:configure",
+]
+
+# STAFF-02. Operates the common-area devices of the sites assigned to them.
+# The operating permission itself arrives through `common-operator`; this role
+# is what makes a concierge able to see the site at all.
+[[role]]
+name = "concierge"
+description = "Operates common-area devices for assigned sites"
+permissions = [
+    "structure:read",
+    "device:read",
+]
+
+# RES-01, GRANT-01. Manages and operates the devices in their own apartment,
+# and grants or revokes an installer's access to them.
+[[role]]
+name = "resident"
+description = "Manages and operates the devices of their own apartment"
+permissions = [
+    "device:create",
+    "device:read",
+    "device:update",
+    "device:delete",
+    "device:configure",
+    "device:operate",
+    "grant:manage",
+]
+
+# GRANT-02. Held only through membership of a `granted-operator@device:<slug>`
+# group, which Phase 2 creates on the first grant and deletes on revoke. One
+# device, one permission, nothing else — the narrowest role in the catalog.
+[[role]]
+name = "granted-operator"
+description = "Operates one specific device, for as long as its resident's grant stands"
+permissions = [
+    "device:operate",
+]
+
+# DEV-05. A device's own service account. Bound to that device's resource, so
+# a device can report only its own state and receive only its own commands.
+# `intercom:call` applies where the binding is scoped: an outdoor intercom gets
+# an additional binding at its building or site so it can ring an apartment.
+[[role]]
+name = "device-self"
+description = "A device acting as itself: reports its state and receives its commands"
+permissions = [
+    "twin:report",
+    "command:receive",
+    "intercom:call",
+]
+
+# STAFF-01, RES-02. Operating a common area — a site lobby or a building
+# entrance. Held by concierges, by installers on their sites, and by the
+# residents of the building and site an apartment belongs to.
+[[role]]
+name = "common-operator"
+description = "Operates the devices of one common area"
+permissions = [
+    "device:read",
+    "device:operate",
+]
+
+# STRUCT-02. Managing the device registry of one common area. Held by property
+# managers and installers; a resident never holds it.
+[[role]]
+name = "common-device-manager"
+description = "Manages the device registry of one common area"
+permissions = [
+    "device:create",
+    "device:read",
+    "device:update",
+    "device:delete",
+    "device:configure",
+]
+
+# -----------------------------------------------------------------------------
+# Group templates (D-21) — which structural groups are created eagerly with a
+# resource. A resource type absent from this list gets none.
+#
+# `building` is deliberately absent: a building's own devices live under its
+# `common:building` node, and an installer reaches its buildings through the
+# site-level binding that cascades down. `device` is deliberately absent too —
+# a device's `granted-operator` group is created lazily, on first grant.
+# -----------------------------------------------------------------------------
+
+[[group_template]]
+resource_type = "portfolio"
+roles = ["property-manager"]
+
+[[group_template]]
+resource_type = "site"
+roles = ["installer", "concierge"]
+
+[[group_template]]
+resource_type = "common"
+roles = ["common-operator", "common-device-manager"]
+
+[[group_template]]
+resource_type = "apartment"
+roles = ["resident"]
