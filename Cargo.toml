@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/domo-common",
+    "tools/domo-bootstrap",
+    "tools/domo-probe",
+    "services/device-twin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+# Every member opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+
+[workspace.dependencies]
+# Pinned exactly: `axiam-sdk` is a pre-release line and was audited `[SUS] (low-downloads)`
+# in 01-RESEARCH.md. Provenance cleared at the plan 01-01 Task 1 human gate on 2026-09-20:
+# crates.io 1.0.0-beta16 (published 2026-09-19, not yanked, sole owner `ilpanich`,
+# sha256 5a97ee60b41aea332e2feb4a5a8729b1f800ac228e414715487640f474a9083b) matches the local
+# checkout at 44d9a49. Only `rest` is enabled: Phase 1 needs neither `grpc`/`amqp` nor OPAQUE,
+# and `management` is always compiled.
+axiam-sdk = { version = "=1.0.0-beta16", default-features = false, features = ["rest"] }
+
+actix-web = { version = "4.15", features = ["rustls-0_23"] }
+rumqttc = "0.25"
+rustls = "0.23"
+rustls-pemfile = "2"
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "json",
+    "cookies",
+] }
+rcgen = "0.14"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4.6", features = ["derive"] }
+toml = "1.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+x509-parser = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+sha2 = "0.10"
+
+domo-common = { path = "crates/domo-common" }
