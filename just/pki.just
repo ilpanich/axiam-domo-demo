@@ -30,6 +30,13 @@ verify-pki:
 
 # --- secrets guards ----------------------------------------------------------
 
+# Three independent layers between the root key and a commit or an image layer:
+# staged-path refusal, ignore integrity, build-context integrity (PKI-06, D-13).
+# The pre-commit hook runs exactly this, so CI, `just verify` and the hook can
+# never disagree about what is safe to commit.
+guard-secrets:
+    @scripts/guard-secrets.sh
+
 # Point git at the repository's own hooks directory, so the pre-commit guard
 # runs for everyone who clones. Git deliberately never does this automatically.
 hooks-install:
