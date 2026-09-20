@@ -188,10 +188,15 @@ services:
       # both are set from first boot.
       AXIAM__AUTH__OPAQUE_SESSION_KEY: "${AXIAM__AUTH__OPAQUE_SESSION_KEY:?generated - run 'just up' instead of raw docker compose}"
       AXIAM__AUTH__OPAQUE_SETUP_KEY: "${AXIAM__AUTH__OPAQUE_SETUP_KEY:?generated - run 'just up' instead of raw docker compose}"
-      # P-9: the running image has been seen to honour either spelling of the
-      # PKI encryption key. Both are set to the SAME 64-hex value so the BYOK
-      # import cannot fail on a name mismatch; the summary records which one the
-      # pulled tag actually used.
+      # P-9, RESOLVED at runtime against image 1.0.0-beta16: the honoured name
+      # is AXIAM__AUTH__PKI_ENCRYPTION_KEY. Proven by setting the two spellings
+      # to DIFFERENT values — signing a device CSR (which must decrypt the
+      # tenant CA's private key) still succeeded while AXIAM__PKI__ENCRYPTION_KEY
+      # held a wrong value, so that spelling is ignored entirely.
+      #
+      # Both are still set, to the same value: the unprefixed name costs
+      # nothing, and a future image that switches to it would otherwise fail at
+      # the BYOK import with a decryption error rather than a naming one.
       AXIAM__AUTH__PKI_ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
       AXIAM__PKI__ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
       # Both spellings, same value — the P-9 pattern again. With only the
