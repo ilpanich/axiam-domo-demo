@@ -4,10 +4,10 @@ current_phase: 01
 current_phase_name: Foundation
 status: executing
 stopped_at: Phase 1 context gathered
-last_updated: "2026-09-20T08:21:57.372Z"
-last_activity: 2026-09-19
-last_activity_desc: ROADMAP.md created from REQUIREMENTS.md (93 v1 requirements, 100% mapped across 6 horizontal-layer phases)
-state_head: 5fb08162f5d9d9239643a19d719a6d65d529df8c
+last_updated: "2026-09-20T08:54:35.181Z"
+last_activity: 2026-09-20
+last_activity_desc: Phase 01 execution started
+state_head: d10918a06d423b1d9db06ba402542761bf5c9026
 progress:
   total_phases: 6
   completed_phases: 0
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every user and device action goes through AXIAM, and the four key demo moments (cross-role denial, resident→installer grant/revoke, tenant isolation, live device loop) run reliably on a single small machine.
-**Current focus:** Phase 1 — Foundation
+**Current focus:** Phase 01 — Foundation
 
 ## Current Position
 
-Phase: 01 (Foundation) — READY TO EXECUTE
-Plan: 0 of TBD in current phase
-Status: Ready to execute
-Last activity: 2026-09-19 — ROADMAP.md created from REQUIREMENTS.md (93 v1 requirements, 100% mapped across 6 horizontal-layer phases)
+Phase: 01 (Foundation) — EXECUTING
+Plan: 1 of 7
+Status: Executing Phase 01
+Last activity: 2026-09-20 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -68,7 +68,7 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+- [2026-09-20] [authz] Non-inheritable grants must be resource-scoped — [todo file](.planning/todos/pending/2026-09-20-non-inheritable-grants-must-be-resource-scoped.md) — Needs Record as a dogfooding finding, not as demo code. Concretely:.
 
 ### Blockers/Concerns
 
