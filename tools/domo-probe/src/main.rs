@@ -1,1 +1,253 @@
-fn main() {}
+//! `domo-probe` — one simulated device, proving the whole chain.
+//!
+//! Two phases, matching the two-phase device identity:
+//!
+//! * `gen-csr` — generate an Ed25519 keypair and a PKCS#10 CSR whose subject is
+//!   `CN=<service-account UUID>`. **The private key never leaves this process's
+//!   filesystem** (D-23, DEV-05): only the CSR is handed to `domo-bootstrap`.
+//! * `connect` — log in to AXIAM over mTLS, then CONNECT to the broker with the
+//!   certificate AND the returned JWT, publish, and subscribe.
+//!
+//! # Why device login is hand-rolled (DF-009)
+//!
+//! The Rust SDK has no `/api/v1/auth/device` operation. Its `device_login` is
+//! the unrelated OAuth 2.0 Device Authorization Grant — the "type this code on
+//! another screen" flow — and reaching for it here would be a category error.
+//! The C++ SDK has `authenticate_device()`; the Rust one does not.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
+use serde::Deserialize;
+
+use domo_common::topic::device_prefix;
+
+const KEY_PATH: &str = "probe/device.key";
+const CSR_PATH: &str = "probe/device.csr";
+const LEAF_PATH: &str = "probe/leaf.pem";
+const SA_ID_PATH: &str = "probe/sa-id";
+
+#[derive(Parser)]
+#[command(name = "domo-probe", about = "Simulated device for the Phase 1 tracer")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Generate the device keypair and a CSR naming its service account.
+    GenCsr,
+    /// Device login over mTLS, then MQTT CONNECT, publish and subscribe.
+    Connect,
+}
+
+/// `POST /api/v1/auth/device` response.
+#[derive(Debug, Deserialize)]
+struct DeviceAuth {
+    access_token: String,
+    token_type: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    expires_in: Option<i64>,
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+fn gen_csr() -> Result<()> {
+    let sa_id = domo_common::secrets::read_string(SA_ID_PATH)
+        .context("no device account id on disk — run the device-account stage first")?;
+
+    println!("  → generating an Ed25519 keypair (the key never leaves this host)");
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .context("generating the device keypair")?;
+
+    let mut params =
+        rcgen::CertificateParams::new(Vec::<String>::new()).context("building CSR params")?;
+    let mut dn = rcgen::DistinguishedName::new();
+    // The subject IS the identity: the broker derives `client_id` from this DN
+    // and the Twin requires `client_id == "CN=" + username`.
+    dn.push(rcgen::DnType::CommonName, sa_id.clone());
+    params.distinguished_name = dn;
+
+    let csr = params
+        .serialize_request(&key)
+        .context("serializing the CSR")?;
+
+    // PKCS#8. Written at 0600 by the secrets helper.
+    domo_common::secrets::write_string(KEY_PATH, &key.serialize_pem())?;
+    domo_common::secrets::write_string(CSR_PATH, &csr.pem().context("encoding the CSR")?)?;
+    println!("  ✓ CSR ready for CN={sa_id}");
+    Ok(())
+}
+
+async fn connect() -> Result<()> {
+    let axiam = env_or("DOMO_AXIAM_URL", "https://axiam-server:8090");
+    let mqtt_host = env_or("DOMO_MQTT_HOST", "rabbitmq");
+    let mqtt_port: u16 = env_or("DOMO_MQTT_PORT", "8883")
+        .parse()
+        .context("DOMO_MQTT_PORT is not a port number")?;
+    let tenant = env_or("DOMO_TENANT_SLUG", "lakeside");
+    let root_path = env_or("DOMO_ROOT_CA", "/etc/domo/pki/root.pem");
+
+    let sa_id = domo_common::secrets::read_string(SA_ID_PATH)?;
+    let root_pem = std::fs::read(&root_path)
+        .with_context(|| format!("reading the organization root at {root_path}"))?;
+    let leaf_pem = domo_common::secrets::read(LEAF_PATH)
+        .context("no issued leaf on disk — run the device-identity stage first")?;
+    let key_pem = domo_common::secrets::read(KEY_PATH)?;
+    let ca_pem = domo_common::secrets::read(format!("axiam/{tenant}-ca.pem"))
+        .with_context(|| format!("no signing CA for '{tenant}' — run the pki stage first"))?;
+
+    // The chain the server must see: leaf first, then the tenant signing CA.
+    // Without the intermediate, AXIAM can anchor the leaf only if it happens to
+    // hold the CA already — and the broker certainly cannot.
+    let mut chain = Vec::new();
+    chain.extend_from_slice(&leaf_pem);
+    chain.push(b'\n');
+    chain.extend_from_slice(&ca_pem);
+
+    // --- device login over mTLS -------------------------------------------
+    println!("  → device login over mTLS at {axiam}");
+    let mut identity_pem = chain.clone();
+    identity_pem.push(b'\n');
+    identity_pem.extend_from_slice(&key_pem);
+    let identity = reqwest::Identity::from_pem(&identity_pem)
+        .context("building the mTLS identity (leaf + CA + PKCS#8 key)")?;
+
+    let http = reqwest::Client::builder()
+        .use_rustls_tls()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(&root_pem).context("root CA is not valid PEM")?,
+        )
+        .identity(identity)
+        .build()
+        .context("building the device HTTP client")?;
+
+    let resp = http
+        .post(format!("{}/api/v1/auth/device", axiam.trim_end_matches('/')))
+        .send()
+        .await
+        .context("POST /api/v1/auth/device")?;
+    let status = resp.status();
+    if !status.is_success() {
+        bail!("device login returned {status}");
+    }
+    let auth: DeviceAuth = resp.json().await.context("decoding the device token")?;
+    if auth.token_type != "Bearer" {
+        bail!("unexpected token_type '{}'", auth.token_type);
+    }
+    if auth.access_token.is_empty() {
+        bail!("device login returned an empty access_token");
+    }
+    // Never print the token.
+    println!("  ✓ device authenticated (Bearer token received)");
+
+    // --- MQTT CONNECT ------------------------------------------------------
+    let client_id = format!("CN={sa_id}");
+    println!("  → MQTT CONNECT to {mqtt_host}:{mqtt_port} as {client_id}");
+
+    let tls = domo_common::tls::shared_client_config_with_identity(&root_pem, &chain, &key_pem)?;
+    let mut opts = rumqttc::MqttOptions::new(client_id, &mqtt_host, mqtt_port);
+    // username = the account UUID, password = the JWT. The Twin checks that
+    // both name the same account as the certificate.
+    opts.set_credentials(sa_id.clone(), auth.access_token.clone());
+    opts.set_keep_alive(Duration::from_secs(30));
+    opts.set_transport(rumqttc::Transport::tls_with_config(
+        rumqttc::TlsConfiguration::Rustls(Arc::new(
+            (*tls).clone(),
+        )),
+    ));
+
+    let prefix = device_prefix(&tenant, &sa_id);
+    let topic = format!("{prefix}/reported");
+    let filter = format!("{prefix}/#");
+
+    let (client, mut eventloop) = rumqttc::AsyncClient::new(opts, 10);
+
+    let payload = format!(r#"{{"probe":"{sa_id}","state":"online"}}"#);
+    let mut subscribed = false;
+    let mut published = false;
+    let mut round_tripped = false;
+
+    // One event loop, driven to the round trip or to a timeout. Every failure
+    // path surfaces the broker's own reason rather than a generic message.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline && !round_tripped {
+        let event = tokio::time::timeout_at(deadline, eventloop.poll()).await;
+        let event = match event {
+            Err(_) => break,
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => {
+                // A CONNACK refusal or a TLS alert lands here. These are the two
+                // signals the plan's assumptions A1 and A2 are about.
+                bail!("MQTT connection failed: {e}");
+            }
+        };
+
+        use rumqttc::{Event, Packet};
+        match event {
+            Event::Incoming(Packet::ConnAck(ack)) => {
+                println!("  ✓ CONNACK: {:?}", ack.code);
+                client
+                    .subscribe(&filter, rumqttc::QoS::AtLeastOnce)
+                    .await
+                    .context("subscribing")?;
+            }
+            Event::Incoming(Packet::SubAck(_)) => {
+                subscribed = true;
+                println!("  ✓ subscribed to {filter}");
+                client
+                    .publish(&topic, rumqttc::QoS::AtLeastOnce, false, payload.clone())
+                    .await
+                    .context("publishing")?;
+            }
+            Event::Incoming(Packet::PubAck(_)) => {
+                published = true;
+                println!("  ✓ published to {topic}");
+            }
+            Event::Incoming(Packet::Publish(p)) => {
+                if p.topic == topic {
+                    round_tripped = true;
+                    println!("  ✓ round trip observed on {}", p.topic);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !subscribed {
+        bail!("never received a SubAck — the broker refused the subscription");
+    }
+    if !published {
+        bail!("never received a PubAck — the broker refused the publish");
+    }
+    if !round_tripped {
+        bail!("published and subscribed, but the message never came back");
+    }
+
+    client.disconnect().await.ok();
+    println!("  ✓ probe complete: cert -> client_id -> username -> sub all agree");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // P-10: before any TLS configuration exists.
+    domo_common::tls::install_crypto_provider();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn".into()),
+        )
+        .init();
+
+    match Cli::parse().cmd {
+        Cmd::GenCsr => gen_csr(),
+        Cmd::Connect => connect().await,
+    }
+}

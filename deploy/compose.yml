@@ -286,6 +286,12 @@ services:
       target: tools
     image: domo-tools:${DOMO_IMAGE_TAG:-dev}
     profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/domo-bootstrap"]
+    # Run as the invoking host user. These tools write issued certificates and
+    # credentials back into the host `.secrets/` tree; as root they would land
+    # root-owned at mode 0600, and the operator's own `openssl verify` (and
+    # every later plan's tooling) could not read them. `just` exports both.
+    user: "${DOMO_UID:-1000}:${DOMO_GID:-1000}"
     environment:
       DOMO_AXIAM_URL: "https://axiam-server:8090"
       DOMO_RABBITMQ_MGMT_URL: "http://rabbitmq:15672"
@@ -298,6 +304,31 @@ services:
     volumes:
       # The tools write issued certificates and admin credentials back to the
       # host `.secrets/` tree, so this one mount is read-write by design.
+      - ../.secrets:/domo/.secrets
+      - ../.secrets/pki:/etc/domo/pki:ro
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # The device probe — same image, different entrypoint.
+  #
+  # Runs on the compose network so it reaches `axiam-server` and `rabbitmq` by
+  # the very DNS names their certificates carry as SANs, which is what makes
+  # this a real mTLS test rather than one with hostname verification relaxed.
+  # ---------------------------------------------------------------------------
+  domo-probe:
+    image: domo-tools:${DOMO_IMAGE_TAG:-dev}
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/domo-probe"]
+    user: "${DOMO_UID:-1000}:${DOMO_GID:-1000}"
+    environment:
+      DOMO_AXIAM_URL: "https://axiam-server:8090"
+      DOMO_MQTT_HOST: "rabbitmq"
+      DOMO_MQTT_PORT: "8883"
+      DOMO_ROOT_CA: "/etc/domo/pki/root.pem"
+      DOMO_SECRETS_DIR: "/domo/.secrets"
+      DOMO_TENANT_SLUG: "lakeside"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
       - ../.secrets:/domo/.secrets
       - ../.secrets/pki:/etc/domo/pki:ro
     networks: [domo-network]
