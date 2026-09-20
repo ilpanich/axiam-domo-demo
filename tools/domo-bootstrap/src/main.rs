@@ -12,10 +12,9 @@
 //! source of truth: delete every marker and a re-run still converges to the
 //! same objects instead of duplicating them (P-8).
 
-mod stages;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use domo_bootstrap::stages;
 
 #[derive(Parser)]
 #[command(name = "domo-bootstrap", about = "Provision AXIAM for the Domo demo")]
