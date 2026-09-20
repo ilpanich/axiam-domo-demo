@@ -8,6 +8,10 @@ use device_twin::rmq::decide::{
 const SA: &str = "01a0be43-4c1e-4f8f-9c0a-2f1d3b5e7a90";
 const OTHER_SA: &str = "7f2c9d10-55aa-4b3c-8e21-0d4f6a8b1c33";
 
+/// An injected instant comfortably inside the fixture session's lifetime.
+/// The decision core never reads a clock, so this is the whole of "now".
+const NOW: i64 = 4_000_000_000;
+
 fn session() -> Session {
     Session {
         tenant_id: "11111111-1111-1111-1111-111111111111".into(),
@@ -20,7 +24,7 @@ fn session() -> Session {
 fn the_shared_topic_exchange_is_reachable() {
     let s = session();
     assert_eq!(
-        decide_resource("domo", SA, "exchange", "amq.topic", Some(&s)),
+        decide_resource("domo", SA, "exchange", "amq.topic", Some(&s), NOW),
         Decision::Allow
     );
 }
@@ -29,7 +33,7 @@ fn the_shared_topic_exchange_is_reachable() {
 fn another_exchange_is_not() {
     let s = session();
     assert_eq!(
-        decide_resource("domo", SA, "exchange", "amq.fanout", Some(&s)),
+        decide_resource("domo", SA, "exchange", "amq.fanout", Some(&s), NOW),
         Decision::Deny(DenyReason::ResourceNotOwned)
     );
 }
@@ -43,7 +47,7 @@ fn a_device_owns_exactly_its_own_derived_queues() {
         format!("mqtt-will-CN={SA}"),
     ] {
         assert_eq!(
-            decide_resource("domo", SA, "queue", &name, Some(&s)),
+            decide_resource("domo", SA, "queue", &name, Some(&s), NOW),
             Decision::Allow,
             "{name} should be this device's own"
         );
@@ -55,7 +59,7 @@ fn a_queue_derived_from_another_client_identifier_is_denied() {
     let s = session();
     let name = format!("mqtt-subscription-CN={OTHER_SA}qos0");
     assert_eq!(
-        decide_resource("domo", SA, "queue", &name, Some(&s)),
+        decide_resource("domo", SA, "queue", &name, Some(&s), NOW),
         Decision::Deny(DenyReason::ResourceNotOwned)
     );
 }
@@ -64,7 +68,7 @@ fn a_queue_derived_from_another_client_identifier_is_denied() {
 fn the_resource_endpoint_checks_the_vhost_first() {
     let s = session();
     assert_eq!(
-        decide_resource("/", SA, "exchange", "amq.topic", Some(&s)),
+        decide_resource("/", SA, "exchange", "amq.topic", Some(&s), NOW),
         Decision::Deny(DenyReason::VhostNotDomo)
     );
 }
@@ -73,11 +77,11 @@ fn the_resource_endpoint_checks_the_vhost_first() {
 fn a_device_publishes_and_subscribes_only_inside_its_own_namespace() {
     let s = session();
     assert_eq!(
-        decide_topic("domo", SA, &format!("domo.lakeside.{SA}.reported"), Some(&s)),
+        decide_topic("domo", SA, &format!("domo.lakeside.{SA}.reported"), Some(&s), NOW),
         Decision::Allow
     );
     assert_eq!(
-        decide_topic("domo", SA, &format!("domo.lakeside.{SA}.#"), Some(&s)),
+        decide_topic("domo", SA, &format!("domo.lakeside.{SA}.#"), Some(&s), NOW),
         Decision::Allow
     );
 }
@@ -90,7 +94,8 @@ fn another_device_in_the_same_tenant_is_out_of_reach() {
             "domo",
             SA,
             &format!("domo.lakeside.{OTHER_SA}.reported"),
-            Some(&s)
+            Some(&s),
+            NOW
         ),
         Decision::Deny(DenyReason::RoutingKeyOutsideNamespace)
     );
@@ -100,7 +105,7 @@ fn another_device_in_the_same_tenant_is_out_of_reach() {
 fn the_same_identifier_in_another_tenant_is_out_of_reach() {
     let s = session();
     assert_eq!(
-        decide_topic("domo", SA, &format!("domo.harbour.{SA}.reported"), Some(&s)),
+        decide_topic("domo", SA, &format!("domo.harbour.{SA}.reported"), Some(&s), NOW),
         Decision::Deny(DenyReason::RoutingKeyOutsideNamespace)
     );
 }
@@ -108,11 +113,11 @@ fn the_same_identifier_in_another_tenant_is_out_of_reach() {
 #[test]
 fn everything_denies_without_a_session() {
     assert_eq!(
-        decide_resource("domo", SA, "exchange", "amq.topic", None),
+        decide_resource("domo", SA, "exchange", "amq.topic", None, NOW),
         Decision::Deny(DenyReason::NoSession)
     );
     assert_eq!(
-        decide_topic("domo", SA, &format!("domo.lakeside.{SA}.x"), None),
+        decide_topic("domo", SA, &format!("domo.lakeside.{SA}.x"), None, NOW),
         Decision::Deny(DenyReason::NoSession)
     );
 }

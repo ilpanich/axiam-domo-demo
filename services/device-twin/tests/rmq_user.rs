@@ -11,6 +11,10 @@ use device_twin::rmq::decide::{
     Decision, DenyReason, Session, UserFacts, decide_user, decide_user_identity, decide_vhost,
 };
 
+/// An injected instant comfortably inside the fixture session's lifetime.
+/// The decision core never reads a clock, so this is the whole of "now".
+const NOW: i64 = 4_000_000_000;
+
 fn session() -> Session {
     Session {
         tenant_id: LAKESIDE_ID.into(),
@@ -94,9 +98,25 @@ fn other_vhosts_are_never_reachable() {
         Decision::Deny(DenyReason::VhostNotDomo)
     );
     assert_eq!(
-        decide_vhost("/", Some(&session())),
+        decide_vhost("/", Some(&session()), NOW),
         Decision::Deny(DenyReason::VhostNotDomo)
     );
+}
+
+#[test]
+fn the_vhost_decision_is_a_pure_cache_lookup() {
+    let s = session();
+    assert_eq!(decide_vhost("domo", Some(&s), NOW), Decision::Allow);
+    assert_eq!(
+        decide_vhost("domo", None, NOW),
+        Decision::Deny(DenyReason::NoSession)
+    );
+    // One second past the token's own expiry is one second too late.
+    assert_eq!(
+        decide_vhost("domo", Some(&s), s.exp),
+        Decision::Deny(DenyReason::SessionExpired)
+    );
+    assert_eq!(decide_vhost("domo", Some(&s), s.exp - 1), Decision::Allow);
 }
 
 #[test]
@@ -291,7 +311,10 @@ async fn every_endpoint_answers_200_for_both_outcomes() {
     ];
     assert_eq!(twin.post("/rmq/user", allow_user).await, (200, "allow".into()));
 
-    let cases: Vec<(&str, Vec<(&str, &str)>, &str)> = vec![
+    /// endpoint, form fields, expected body.
+    type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, &'a str);
+
+    let cases: Vec<Case<'_>> = vec![
         (
             "/rmq/user",
             vec![

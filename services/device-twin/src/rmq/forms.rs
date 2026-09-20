@@ -3,6 +3,16 @@
 //! The parameter lists come from `rabbit_auth_backend_http.erl` on the 4.3.x
 //! line, transported as `application/x-www-form-urlencoded` over POST (never
 //! GET — the broker debug-logs the full URL, credentials included).
+//!
+//! Every struct is **strict**: `deny_unknown_fields`, and required fields that
+//! are genuinely required rather than silently defaulted. That is this
+//! service's input-validation control (ASVS V5) — a field the broker did not
+//! send must not read as an empty string that happens to compare unequal.
+//!
+//! Strictness cuts both ways, and deliberately: if a future broker minor adds
+//! a parameter, these structs reject the request and the decision is `deny`,
+//! which is the safe direction but a visible one. Plan 01-06's live CONNECT
+//! against the real broker is what would surface it immediately.
 
 use serde::Deserialize;
 
@@ -12,6 +22,7 @@ use serde::Deserialize;
 /// defaulted: a CONNECT without one must be refused, not treated as an empty
 /// credential.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserReq {
     pub username: String,
     pub password: String,
@@ -26,6 +37,7 @@ pub struct UserReq {
 
 /// `POST /rmq/vhost`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VhostReq {
     pub username: String,
     pub vhost: String,
@@ -41,6 +53,7 @@ pub struct VhostReq {
 /// ownership of the resource is the whole decision, and a device that owns its
 /// queue may do all three to it.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceReq {
     pub username: String,
     pub vhost: String,
@@ -56,6 +69,7 @@ pub struct ResourceReq {
 /// The broker sends the exchange in `name` and the AMQP-translated topic in
 /// `routing_key`; `variable_map.*` repeats the connection's own identity.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TopicReq {
     pub username: String,
     pub vhost: String,

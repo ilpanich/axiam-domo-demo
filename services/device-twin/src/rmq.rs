@@ -50,6 +50,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/rmq/topic", web::post().to(rmq_topic));
 }
 
+/// The wall clock, read once per request and then injected.
+///
+/// This is the only place the Twin's authorization path looks at a clock. The
+/// decision core never does — which is what lets the suite drive expiry,
+/// skew and liveness deterministically.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 /// The one response shape this service ever produces.
 fn reply(d: Decision) -> HttpResponse {
     if let Some(reason) = d.reason() {
@@ -150,7 +161,11 @@ async fn rmq_vhost(
         return reply(Decision::Deny(DenyReason::MalformedRequest));
     };
     let r = form.into_inner();
-    reply(decide_vhost(&r.vhost, st.sessions.get(&r.username).as_ref()))
+    reply(decide_vhost(
+        &r.vhost,
+        st.sessions.get(&r.username).as_ref(),
+        now_unix(),
+    ))
 }
 
 async fn rmq_resource(
@@ -167,6 +182,7 @@ async fn rmq_resource(
         &r.resource,
         &r.name,
         st.sessions.get(&r.username).as_ref(),
+        now_unix(),
     ))
 }
 
@@ -183,5 +199,6 @@ async fn rmq_topic(
         &r.username,
         &r.routing_key,
         st.sessions.get(&r.username).as_ref(),
+        now_unix(),
     ))
 }

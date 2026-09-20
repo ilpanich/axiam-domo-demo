@@ -137,6 +137,42 @@ pub struct Session {
     pub exp: i64,
 }
 
+impl Session {
+    /// Whether this session is still inside its token's lifetime.
+    ///
+    /// `now` is injected rather than read: it is the only time-like input any
+    /// decision in this module has, which is what keeps the whole core pure.
+    #[must_use]
+    pub fn is_live(&self, now: i64) -> bool {
+        now < self.exp
+    }
+}
+
+/// Resolve a cached session to an `Allow`, or to the reason it cannot serve.
+fn live_session(session: Option<&Session>, now: i64) -> Result<&Session, DenyReason> {
+    match session {
+        None => Err(DenyReason::NoSession),
+        Some(s) if !s.is_live(now) => Err(DenyReason::SessionExpired),
+        Some(s) => Ok(s),
+    }
+}
+
+/// Whether a user name is shaped like an AXIAM service-account identifier.
+///
+/// Devices connect as their service account, whose identifier is a UUID — the
+/// same value that is the certificate subject, the token subject and the MQTT
+/// user name. Checking the shape first means a hostile or malformed name is
+/// refused before any key-set work at all (T-05-08).
+///
+/// The colon exclusion is not redundant decoration: the broker's MQTT plugin
+/// splits `vhost:user` at the *last* colon, so a name containing one would be
+/// read differently by the broker than by us. A UUID never contains one, and
+/// asserting it here keeps that true by construction.
+#[must_use]
+pub fn is_service_account_id(username: &str) -> bool {
+    !username.contains(':') && uuid::Uuid::try_parse(username).is_ok()
+}
+
 /// What the broker tells us at CONNECT, plus the outcome of verification.
 ///
 /// `token_sub` is `None` when verification failed — the caller does the
@@ -183,7 +219,7 @@ pub fn decide_user_identity(
     {
         return Decision::Deny(DenyReason::VhostNotDomo);
     }
-    if username.is_empty() {
+    if !is_service_account_id(username) {
         return Decision::Deny(DenyReason::UsernameNotAServiceAccount);
     }
     match client_id {
@@ -206,15 +242,20 @@ pub fn decide_user_subject(username: &str, token_sub: Option<&str>) -> Decision 
 }
 
 /// Decide a virtual-host check. Only `domo`, and only for a live session.
+///
+/// A pure cache lookup: present, unexpired, and naming `domo`. Every other
+/// outcome — a miss included — denies. This endpoint receives no token and has
+/// no other evidence, so failing open here would grant every subsequent
+/// operation for free (T-05-05).
 #[must_use]
-pub fn decide_vhost(vhost: &str, session: Option<&Session>) -> Decision {
+pub fn decide_vhost(vhost: &str, session: Option<&Session>, now: i64) -> Decision {
     if vhost != DOMO_VHOST {
         return Decision::Deny(DenyReason::VhostNotDomo);
     }
-    if session.is_none() {
-        return Decision::Deny(DenyReason::NoSession);
+    match live_session(session, now) {
+        Ok(_) => Decision::Allow,
+        Err(reason) => Decision::Deny(reason),
     }
-    Decision::Allow
 }
 
 /// Decide a resource (exchange/queue) check.
@@ -230,12 +271,13 @@ pub fn decide_resource(
     resource: &str,
     name: &str,
     session: Option<&Session>,
+    now: i64,
 ) -> Decision {
     if vhost != DOMO_VHOST {
         return Decision::Deny(DenyReason::VhostNotDomo);
     }
-    if session.is_none() {
-        return Decision::Deny(DenyReason::NoSession);
+    if let Err(reason) = live_session(session, now) {
+        return Decision::Deny(reason);
     }
     if resource == "exchange" && name == SHARED_TOPIC_EXCHANGE {
         return Decision::Allow;
@@ -270,12 +312,14 @@ pub fn decide_topic(
     username: &str,
     routing_key: &str,
     session: Option<&Session>,
+    now: i64,
 ) -> Decision {
     if vhost != DOMO_VHOST {
         return Decision::Deny(DenyReason::VhostNotDomo);
     }
-    let Some(s) = session else {
-        return Decision::Deny(DenyReason::NoSession);
+    let s = match live_session(session, now) {
+        Ok(s) => s,
+        Err(reason) => return Decision::Deny(reason),
     };
     if owns_routing_key(&s.tenant_slug, username, routing_key) {
         Decision::Allow
