@@ -1,12 +1,17 @@
 //! Stage 2 — create the demo tenants.
 //!
-//! The tracer needs exactly one tenant. Plans 01-02 onward add the second and
-//! the rest of the resource tree; the shape here is what they extend.
+//! Both of D-19's fictional brands: Lakeside Residences and Summit Homes. They
+//! are the tenant isolation the demo exists to show, so they are separate all
+//! the way down — separate admin principals, separate signing CAs, separate
+//! service credentials, separate resource trees.
 //!
 //! Tenant creation itself goes through the SDK, as the project constraint
 //! requires. Only the tenant-admin provisioning is hand-rolled, and only
 //! because DF-008 leaves it uncovered: the SDK sends no acting-tenant header,
 //! so an organization-level principal cannot address a tenant through it.
+//! That work lives in [`super::tenant_admin`]; it is called from here as well
+//! as standing alone as its own stage, so the tracer's stage sequence keeps
+//! working unchanged while `just authz` can re-run it on its own.
 
 use std::collections::HashMap;
 
@@ -16,10 +21,14 @@ use axiam_sdk::management::page::PageRequest;
 
 use domo_common::hand_rolled::HandRolled;
 
-use super::{Env, ok, step, super_admin_credentials, tenant_admin_credentials};
+use super::{Env, OrgClient, TenantClient, ok, step, super_admin_credentials, tenant_admin};
 
-/// The tracer's single tenant.
-const TENANTS: &[(&str, &str)] = &[("Lakeside Residences", "lakeside")];
+/// The demo tenants (D-19). The slugs are what tests, topics and documentation
+/// refer to; the display names are editable, the slugs are not.
+pub const TENANTS: &[(&str, &str)] = &[
+    ("Lakeside Residences", "lakeside"),
+    ("Summit Homes", "summit"),
+];
 
 pub async fn run() -> Result<()> {
     let env = Env::load()?;
@@ -72,12 +81,7 @@ pub async fn run() -> Result<()> {
 
         // The tenant admin is what leaf issuance logs in as, so that the
         // certificate is signed by THIS tenant's CA and not another's (P-11).
-        let admin = tenant_admin_credentials(&env.org_slug, slug)?;
-        step(&format!("provisioning tenant admin for '{slug}'"));
-        session
-            .provision_tenant_admin(tenant_id, &admin.username, &admin.email, &admin.password)
-            .await
-            .with_context(|| format!("provisioning the '{slug}' tenant admin"))?;
+        tenant_admin::ensure(&session, &env, tenant_id, slug).await?;
         ok(&format!("tenant '{slug}' ready ({tenant_id})"));
     }
 
@@ -102,4 +106,67 @@ pub async fn run() -> Result<()> {
 
     domo_common::secrets::mark_done("tenants")?;
     Ok(())
+}
+
+/// Assert both tenants exist, and that nothing was created in the reserved
+/// `organization` tenant (P-1, T-04-01).
+///
+/// The second half is the one that cannot be caught any other way: an
+/// organization principal writing through a tenant-scoped route succeeds
+/// silently, and the object it creates is invisible to every later lookup
+/// because nothing ever looks there. The type system prevents the call; this
+/// asserts the outcome independently, because a silent failure deserves two
+/// unrelated guards rather than one clever one.
+pub async fn verify(org: &OrgClient, env: &Env) -> Result<bool> {
+    let mut passed = true;
+
+    let tenants = org.demo_tenants().await?;
+    let mut slugs: Vec<&str> = tenants.iter().map(|t| t.slug.as_str()).collect();
+    slugs.sort_unstable();
+    let expected: Vec<&str> = {
+        let mut e: Vec<&str> = TENANTS.iter().map(|(_, s)| *s).collect();
+        e.sort_unstable();
+        e
+    };
+    if slugs == expected {
+        super::ok(&format!("tenants  {}", slugs.join(", ")));
+    } else {
+        super::fail(&format!(
+            "tenants  expected [{}], found [{}]",
+            expected.join(", "),
+            slugs.join(", ")
+        ));
+        passed = false;
+    }
+
+    // Every object a tenant-scoped stage created must carry that tenant's id.
+    for tenant in &tenants {
+        let client = TenantClient::login(env, &tenant.slug, tenant.id).await?;
+        let resources = client
+            .resources()
+            .list_all(PageRequest::first(200))
+            .await
+            .with_context(|| format!("listing resources in '{}'", tenant.slug))?;
+        let strays: Vec<&str> = resources
+            .iter()
+            .filter(|r| r.tenant_id != tenant.id)
+            .map(|r| r.name.as_str())
+            .collect();
+        if strays.is_empty() {
+            super::ok(&format!(
+                "tenant-scope  {}  {} resource(s), all stamped with this tenant",
+                tenant.slug,
+                resources.len()
+            ));
+        } else {
+            super::fail(&format!(
+                "tenant-scope  {}  resource(s) created under the wrong tenant: {}",
+                tenant.slug,
+                strays.join(", ")
+            ));
+            passed = false;
+        }
+    }
+
+    Ok(passed)
 }

@@ -5,6 +5,8 @@ pub mod catalog;
 pub mod device_identity;
 pub mod org_bootstrap;
 pub mod pki;
+pub mod service_certs;
+pub mod tenant_admin;
 pub mod tenants;
 
 use std::ops::Deref;
@@ -259,4 +261,54 @@ pub fn step(msg: &str) {
 /// Print one success line.
 pub fn ok(msg: &str) {
     println!("  ✓ {msg}");
+}
+
+/// Print one failure line. Verification prints these and keeps going, so one
+/// run reports every broken invariant rather than only the first.
+pub fn fail(msg: &str) {
+    println!("  ✗ {msg}");
+}
+
+/// True when a CSR and a certificate carry the same public key.
+///
+/// Compared as raw SubjectPublicKeyInfo bytes, the one representation that
+/// cannot disagree on encoding details. A parse failure returns `false`: if we
+/// cannot prove they match, we must not reuse — a certificate paired with the
+/// wrong key is an mTLS identity whose halves disagree, and the failure
+/// surfaces far from its cause.
+#[must_use]
+pub fn public_keys_match(csr_pem: &str, cert_pem: &str) -> bool {
+    use x509_parser::prelude::{FromDer, X509Certificate, X509CertificationRequest};
+
+    let Ok((_, csr_block)) = x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()) else {
+        return false;
+    };
+    let Ok((_, csr)) = X509CertificationRequest::from_der(&csr_block.contents) else {
+        return false;
+    };
+    let Ok((_, cert_block)) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()) else {
+        return false;
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(&cert_block.contents) else {
+        return false;
+    };
+    csr.certification_request_info.subject_pki.raw == cert.tbs_certificate.subject_pki.raw
+}
+
+/// Run every Phase 1 authorization invariant and report each as `✓` or `✗`.
+///
+/// Fails the process only at the end, so a single run tells you everything
+/// that is wrong rather than the first thing.
+pub async fn verify_all() -> Result<()> {
+    let env = Env::load()?;
+    let org = OrgClient::login(&env).await?;
+
+    let mut passed = true;
+    passed &= tenants::verify(&org, &env).await?;
+    passed &= pki::verify(&org).await?;
+    passed &= service_certs::verify(&org, &env).await?;
+
+    anyhow::ensure!(passed, "authz-verify found at least one broken invariant");
+    println!("✓ authz-verify");
+    Ok(())
 }

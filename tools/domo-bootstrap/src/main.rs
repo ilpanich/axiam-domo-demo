@@ -62,6 +62,13 @@ enum Stage {
     },
     /// Create the `domo` MQTT vhost, touching no other vhost.
     Broker,
+    /// Provision each tenant's admin user — the principal every tenant-scoped
+    /// stage logs in as (D-37).
+    TenantAdmin,
+    /// Issue one service account and certificate per (service, tenant) (D-20).
+    ServiceCerts,
+    /// Assert every Phase 1 authorization invariant.
+    AuthzVerify,
     /// Apply `authz/catalog.toml` to one tenant (D-16).
     Catalog {
         /// Tenant slug to apply the catalog to.
@@ -100,6 +107,9 @@ async fn main() -> Result<()> {
             stages::device_identity::sign(&csr, &out, &tenant).await
         }
         Stage::Broker => stages::broker::run().await,
+        Stage::TenantAdmin => stages::tenant_admin::run().await,
+        Stage::ServiceCerts => stages::service_certs::run().await,
+        Stage::AuthzVerify => stages::verify_all().await,
         Stage::Catalog { tenant, plan_only } => {
             stages::catalog::run(&tenant, plan_only).await
         }

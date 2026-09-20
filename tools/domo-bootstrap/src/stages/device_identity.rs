@@ -74,28 +74,10 @@ async fn resolve_tenant_ca(env: &Env, tenant_slug: &str) -> Result<(Uuid, Uuid)>
     Ok((tenant.id, ca.id))
 }
 
-/// True when a CSR and a certificate carry the same public key.
-///
-/// Compared as raw SubjectPublicKeyInfo bytes, which is the one representation
-/// that cannot disagree on encoding details. A parse failure returns `false`:
-/// if we cannot prove they match, we must not reuse.
-fn public_keys_match(csr_pem: &str, cert_pem: &str) -> bool {
-    use x509_parser::prelude::{FromDer, X509Certificate, X509CertificationRequest};
-
-    let Ok((_, csr_block)) = x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()) else {
-        return false;
-    };
-    let Ok((_, csr)) = X509CertificationRequest::from_der(&csr_block.contents) else {
-        return false;
-    };
-    let Ok((_, cert_block)) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()) else {
-        return false;
-    };
-    let Ok((_, cert)) = X509Certificate::from_der(&cert_block.contents) else {
-        return false;
-    };
-    csr.certification_request_info.subject_pki.raw == cert.tbs_certificate.subject_pki.raw
-}
+// `public_keys_match` moved to `super`: the service-account credentials of
+// `service_certs.rs` need exactly the same reuse test, and two copies of a
+// certificate-identity check is one copy too many.
+use super::public_keys_match;
 
 /// Phase 1 — create (or find) the device's service account.
 pub async fn ensure_account(name: &str, tenant_slug: &str) -> Result<Uuid> {
