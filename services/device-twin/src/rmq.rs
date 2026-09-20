@@ -1,396 +1,187 @@
-//! RabbitMQ HTTP authorization backend.
+//! RabbitMQ HTTP authorization backend — the thin handler layer.
 //!
 //! The broker calls these four endpoints for every CONNECT, publish and
-//! subscribe. The contract is narrow and unforgiving: respond `200` with a
-//! body of exactly `allow`, `deny`, or `allow <tags>`. Any other status — or
-//! any other body — is treated by the broker as a backend error, and the
-//! operation is refused with a message that does not say why.
+//! subscribe. The contract is narrow and unforgiving: respond **HTTP 200** with
+//! a plain-text body of exactly `allow` or `deny`. Any other status is read by
+//! the broker as a backend *error* rather than as a denial (T-05-06), which
+//! silently changes failure semantics — so no handler here returns 4xx or 5xx
+//! on an ordinary decision, including one that failed to parse.
 //!
-//! # The identity chain (T-01-01)
-//!
-//! Four hops, each enforced by a different component:
-//!
-//! 1. TLS: the broker requires a client certificate chaining to the org root.
-//! 2. `mqtt.ssl_cert_client_id_from = distinguished_name`: the broker refuses a
-//!    CONNECT whose `client_id` differs from the certificate's subject DN.
-//! 3. Here: `client_id == "CN=" + username`.
-//! 4. Here: the JWT verifies against AXIAM's JWKS *for the tenant it claims*,
-//!    and its `sub` equals `username`.
-//!
-//! Hops 3 and 4 are what make hop 2 mean something: together they force the
-//! certificate, the connection identity and the token to name one account. A
-//! stolen JWT replayed without the matching certificate dies at hop 1.
-//!
-//! The decision logic is a pure function ([`decide_user`] and friends) taking
-//! already-gathered facts, so it is unit-testable with no server, no broker and
-//! no network.
+//! Everything decidable lives in [`decide`]; everything parseable lives in
+//! [`forms`]. This module only joins them to the network.
 
-use std::collections::HashMap;
+pub mod decide;
+pub mod forms;
 
-use serde::Deserialize;
+use std::sync::Arc;
 
-use domo_common::DOMO_VHOST;
-use domo_common::topic::owns_routing_key;
+use actix_web::{HttpResponse, Responder, web};
 
-/// The answer the broker understands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
-    Allow,
-    /// Denied. The reason is for *our* logs, never for the wire: the broker
-    /// only ever sees `deny`.
-    Deny(&'static str),
+use decide::{
+    Decision, DenyReason, Session, UserFacts, decide_resource, decide_topic, decide_user_identity,
+    decide_user_subject, decide_vhost,
+};
+use forms::{ResourceReq, TopicReq, UserReq, VhostReq};
+
+use crate::tenants::{SessionCache, TenantRegistry, peek_tenant_id};
+
+/// Everything the handlers share.
+pub struct TwinState {
+    pub tenants: Arc<TenantRegistry>,
+    pub sessions: Arc<SessionCache>,
 }
 
-impl Decision {
-    /// The literal body the broker expects.
+impl TwinState {
     #[must_use]
-    pub fn body(&self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Deny(_) => "deny",
-        }
-    }
-
-    #[must_use]
-    pub fn is_allow(&self) -> bool {
-        matches!(self, Self::Allow)
+    pub fn new(tenants: Arc<TenantRegistry>, sessions: Arc<SessionCache>) -> Self {
+        Self { tenants, sessions }
     }
 }
 
-/// An authenticated device session, cached after a successful `/rmq/user`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Session {
-    pub tenant_id: String,
-    pub tenant_slug: String,
-    pub exp: i64,
-}
-
-/// What the broker tells us at CONNECT, plus the verified token's subject.
+/// Register the health endpoint and the four authorization endpoints.
 ///
-/// `jwt_sub` is `None` when verification failed — the caller does the network
-/// work, this function does the deciding.
-#[derive(Debug, Clone)]
-pub struct UserFacts<'a> {
-    pub username: &'a str,
-    pub vhost: Option<&'a str>,
-    pub client_id: Option<&'a str>,
-    pub jwt_sub: Option<&'a str>,
+/// Shared by `main.rs` and by the test suite, so the tests exercise the very
+/// routing table the broker talks to.
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.route("/healthz", web::get().to(healthz))
+        .route("/rmq/user", web::post().to(rmq_user))
+        .route("/rmq/vhost", web::post().to(rmq_vhost))
+        .route("/rmq/resource", web::post().to(rmq_resource))
+        .route("/rmq/topic", web::post().to(rmq_topic));
 }
 
-/// Decide a CONNECT.
+/// The one response shape this service ever produces.
+fn reply(d: Decision) -> HttpResponse {
+    if let Some(reason) = d.reason() {
+        // A compile-time-constant string. There is no path by which a password
+        // or a token can reach a log record from here (T-05-07).
+        tracing::debug!(reason = reason.message(), "denied");
+    }
+    HttpResponse::Ok().content_type("text/plain").body(d.body())
+}
+
+async fn healthz() -> impl Responder {
+    HttpResponse::Ok().content_type("text/plain").body("ok")
+}
+
+/// CONNECT. The only endpoint that verifies a token; the rest read its result.
+async fn rmq_user(
+    form: Result<web::Form<UserReq>, actix_web::Error>,
+    st: web::Data<TwinState>,
+) -> HttpResponse {
+    // A parse failure is a *decision*, not a transport error: returning the
+    // extractor's own 400 would make the broker report a backend outage.
+    let Ok(form) = form else {
+        return reply(Decision::Deny(DenyReason::MalformedRequest));
+    };
+    let r = form.into_inner();
+
+    // Identity fields only — never `r.password`, which is the access token.
+    tracing::debug!(
+        username = %r.username,
+        client_id = ?r.client_id,
+        vhost = ?r.vhost,
+        "CONNECT attempt"
+    );
+
+    // The cheap, purely local hops first, so a malformed or hostile connect
+    // costs no key-set work at all (T-05-08).
+    let identity = decide_user_identity(&r.username, r.vhost.as_deref(), r.client_id.as_deref());
+    if !identity.is_allow() {
+        return reply(identity);
+    }
+
+    // Route to a verifier using the token's *unverified* tenant claim, then
+    // let that verifier re-check the claim it was chosen by.
+    let Some(tenant_id) = peek_tenant_id(&r.password) else {
+        return reply(Decision::Deny(DenyReason::UnknownTenant));
+    };
+    if !st.tenants.knows(&tenant_id) {
+        // Deny before building or invoking any verifier: a token naming an
+        // unregistered tenant must never be tried against another's.
+        return reply(Decision::Deny(DenyReason::UnknownTenant));
+    }
+    let verifier = match st.tenants.verifier(&tenant_id) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not build a verifier");
+            return reply(Decision::Deny(DenyReason::UnknownTenant));
+        }
+    };
+
+    let claims = match verifier.verify(&r.password).await {
+        Ok(c) => c,
+        Err(e) => {
+            // The SDK's error never carries the token itself.
+            tracing::debug!(error = %e, "token verification failed");
+            return reply(Decision::Deny(DenyReason::TokenDidNotVerify));
+        }
+    };
+
+    let decision = decide_user_subject(&r.username, Some(&claims.sub));
+    if decision.is_allow() {
+        let Some(slug) = st.tenants.slug(&claims.tenant_id) else {
+            return reply(Decision::Deny(DenyReason::UnknownTenant));
+        };
+        st.sessions.insert(
+            r.username.clone(),
+            Session {
+                tenant_id: claims.tenant_id.clone(),
+                tenant_slug: slug,
+                exp: claims.exp,
+            },
+        );
+        tracing::info!(account = %r.username, tenant = %claims.tenant_id, "CONNECT allowed");
+    }
+    reply(decision)
+}
+
+/// The full CONNECT decision, for callers that already hold every fact.
 #[must_use]
 pub fn decide_user(f: &UserFacts<'_>) -> Decision {
-    if f.username.is_empty() {
-        return Decision::Deny("empty username");
-    }
-    // The broker omits `vhost` on the user path in some configurations; when it
-    // is present it must be ours. The vhost path re-checks it unconditionally.
-    if let Some(v) = f.vhost
-        && v != DOMO_VHOST
-    {
-        return Decision::Deny("vhost is not domo");
-    }
-    // Hop 3: the connection identity must be the certificate subject for this
-    // very account. Absent client_id means the broker did not derive one from
-    // the certificate, which is itself disqualifying.
-    match f.client_id {
-        Some(cid) if cid == format!("CN={}", f.username) => {}
-        Some(_) => return Decision::Deny("client_id does not match CN=<username>"),
-        None => return Decision::Deny("no client_id derived from the certificate"),
-    }
-    // Hop 4: the token must verify AND name this same account.
-    match f.jwt_sub {
-        Some(sub) if sub == f.username => Decision::Allow,
-        Some(_) => Decision::Deny("token subject does not match the connecting account"),
-        None => Decision::Deny("token did not verify"),
-    }
+    decide::decide_user(f)
 }
 
-/// Decide a vhost access check. Only `domo`, and only for a live session.
-#[must_use]
-pub fn decide_vhost(vhost: &str, session: Option<&Session>) -> Decision {
-    if vhost != DOMO_VHOST {
-        return Decision::Deny("vhost is not domo");
-    }
-    if session.is_none() {
-        return Decision::Deny("no authenticated session for this user");
-    }
-    Decision::Allow
-}
-
-/// Decide a resource (exchange/queue) check.
-///
-/// A device may use the shared `amq.topic` exchange and its own MQTT plumbing
-/// queues, and nothing else. The queue names are RabbitMQ's own MQTT plugin
-/// convention, derived from the client id — which hop 3 has already pinned to
-/// this account.
-#[must_use]
-pub fn decide_resource(
-    vhost: &str,
-    username: &str,
-    resource: &str,
-    name: &str,
-    session: Option<&Session>,
-) -> Decision {
-    if vhost != DOMO_VHOST {
-        return Decision::Deny("vhost is not domo");
-    }
-    if session.is_none() {
-        return Decision::Deny("no authenticated session for this user");
-    }
-    if resource == "exchange" && name == "amq.topic" {
-        return Decision::Allow;
-    }
-    if resource == "queue" && owns_mqtt_queue(username, name) {
-        return Decision::Allow;
-    }
-    Decision::Deny("resource is not owned by this device")
-}
-
-/// The MQTT plugin's per-client queue names, for `client_id = "CN=<username>"`.
-#[must_use]
-pub fn owns_mqtt_queue(username: &str, name: &str) -> bool {
-    let cid = format!("CN={username}");
-    name == format!("mqtt-subscription-{cid}qos0")
-        || name == format!("mqtt-subscription-{cid}qos1")
-        || name == format!("mqtt-will-{cid}")
-}
-
-/// Decide a topic (routing-key) check.
-///
-/// Allowed only beneath `domo.<tenant_slug>.<sa-uuid>.`, which is what confines
-/// one device to its own topic space.
-#[must_use]
-pub fn decide_topic(
-    vhost: &str,
-    username: &str,
-    routing_key: &str,
-    session: Option<&Session>,
-) -> Decision {
-    if vhost != DOMO_VHOST {
-        return Decision::Deny("vhost is not domo");
-    }
-    let Some(s) = session else {
-        return Decision::Deny("no authenticated session for this user");
+async fn rmq_vhost(
+    form: Result<web::Form<VhostReq>, actix_web::Error>,
+    st: web::Data<TwinState>,
+) -> HttpResponse {
+    let Ok(form) = form else {
+        return reply(Decision::Deny(DenyReason::MalformedRequest));
     };
-    // A subscribe on `domo/<tenant>/<sa>/#` arrives as this exact prefix with a
-    // trailing `#`, which the ownership check accepts.
-    if owns_routing_key(&s.tenant_slug, username, routing_key) {
-        Decision::Allow
-    } else {
-        Decision::Deny("routing key is outside the device's own topic space")
-    }
+    let r = form.into_inner();
+    reply(decide_vhost(&r.vhost, st.sessions.get(&r.username).as_ref()))
 }
 
-/// Read `tenant_id` out of a JWT **without verifying it**.
-///
-/// This only chooses *which* verifier to use. The chosen verifier is built with
-/// `expect_tenant_id`, so a token lying about its tenant fails verification a
-/// moment later — the unverified peek cannot promote anything.
-#[must_use]
-pub fn peek_tenant_id(jwt: &str) -> Option<String> {
-    use base64::Engine as _;
-    let payload = jwt.split('.').nth(1)?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    v.get("tenant_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+async fn rmq_resource(
+    form: Result<web::Form<ResourceReq>, actix_web::Error>,
+    st: web::Data<TwinState>,
+) -> HttpResponse {
+    let Ok(form) = form else {
+        return reply(Decision::Deny(DenyReason::MalformedRequest));
+    };
+    let r = form.into_inner();
+    reply(decide_resource(
+        &r.vhost,
+        &r.username,
+        &r.resource,
+        &r.name,
+        st.sessions.get(&r.username).as_ref(),
+    ))
 }
 
-// --- wire forms -------------------------------------------------------------
-//
-// `#[serde(default)]` throughout: RabbitMQ's field set varies by backend
-// version and by whether the MQTT plugin derived a client id. A missing field
-// must produce a deny, not a 400 that the broker reports as a backend error.
-
-#[derive(Debug, Deserialize)]
-pub struct UserReq {
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-    #[serde(default)]
-    pub vhost: Option<String>,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct VhostReq {
-    pub username: String,
-    pub vhost: String,
-}
-
-// `permission` ("configure"/"write"/"read") is captured but not branched on:
-// ownership of the resource is the whole decision here, and a device that owns
-// its queue may do all three to it. Kept so the payload is documented in full
-// and so a future plan can tighten per-permission rules without re-deriving it.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct ResourceReq {
-    pub username: String,
-    pub vhost: String,
-    pub resource: String,
-    pub name: String,
-    #[serde(default)]
-    pub permission: String,
-}
-
-// Same reasoning: only `routing_key` decides, the rest documents the payload.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct TopicReq {
-    pub username: String,
-    pub vhost: String,
-    #[serde(default)]
-    pub resource: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub permission: String,
-    #[serde(default)]
-    pub routing_key: String,
-}
-
-/// In-memory session cache, keyed by service-account UUID.
-pub type SessionCache = HashMap<String, Session>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn session() -> Session {
-        Session {
-            tenant_id: "11111111-1111-1111-1111-111111111111".into(),
-            tenant_slug: "lakeside".into(),
-            exp: 4_102_444_800,
-        }
-    }
-
-    #[test]
-    fn connect_allowed_when_every_hop_agrees() {
-        let f = UserFacts {
-            username: "sa-1",
-            vhost: Some("domo"),
-            client_id: Some("CN=sa-1"),
-            jwt_sub: Some("sa-1"),
-        };
-        assert_eq!(decide_user(&f), Decision::Allow);
-    }
-
-    #[test]
-    fn connect_refused_when_client_id_is_not_the_certificate_subject() {
-        // This is the hop that makes a stolen token useless without the cert.
-        let f = UserFacts {
-            username: "sa-1",
-            vhost: Some("domo"),
-            client_id: Some("CN=sa-2"),
-            jwt_sub: Some("sa-1"),
-        };
-        assert!(!decide_user(&f).is_allow());
-    }
-
-    #[test]
-    fn connect_refused_when_token_names_another_account() {
-        let f = UserFacts {
-            username: "sa-1",
-            vhost: Some("domo"),
-            client_id: Some("CN=sa-1"),
-            jwt_sub: Some("sa-2"),
-        };
-        assert!(!decide_user(&f).is_allow());
-    }
-
-    #[test]
-    fn connect_refused_without_a_verified_token_or_a_client_id() {
-        let base = UserFacts {
-            username: "sa-1",
-            vhost: Some("domo"),
-            client_id: Some("CN=sa-1"),
-            jwt_sub: None,
-        };
-        assert!(!decide_user(&base).is_allow());
-
-        let no_cid = UserFacts {
-            client_id: None,
-            jwt_sub: Some("sa-1"),
-            ..base.clone()
-        };
-        assert!(!decide_user(&no_cid).is_allow());
-    }
-
-    #[test]
-    fn other_vhosts_are_never_reachable() {
-        let f = UserFacts {
-            username: "sa-1",
-            vhost: Some("/"),
-            client_id: Some("CN=sa-1"),
-            jwt_sub: Some("sa-1"),
-        };
-        assert!(!decide_user(&f).is_allow());
-        assert!(!decide_vhost("/", Some(&session())).is_allow());
-    }
-
-    #[test]
-    fn resources_are_limited_to_the_shared_exchange_and_own_queues() {
-        let s = session();
-        assert!(decide_resource("domo", "sa-1", "exchange", "amq.topic", Some(&s)).is_allow());
-        assert!(
-            decide_resource(
-                "domo",
-                "sa-1",
-                "queue",
-                "mqtt-subscription-CN=sa-1qos0",
-                Some(&s)
-            )
-            .is_allow()
-        );
-        // Another device's queue.
-        assert!(
-            !decide_resource(
-                "domo",
-                "sa-1",
-                "queue",
-                "mqtt-subscription-CN=sa-2qos0",
-                Some(&s)
-            )
-            .is_allow()
-        );
-        // Any other exchange.
-        assert!(!decide_resource("domo", "sa-1", "exchange", "amq.fanout", Some(&s)).is_allow());
-    }
-
-    #[test]
-    fn topics_are_confined_to_the_devices_own_space() {
-        let s = session();
-        assert!(decide_topic("domo", "sa-1", "domo.lakeside.sa-1.reported", Some(&s)).is_allow());
-        assert!(decide_topic("domo", "sa-1", "domo.lakeside.sa-1.#", Some(&s)).is_allow());
-        assert!(!decide_topic("domo", "sa-1", "domo.lakeside.sa-2.reported", Some(&s)).is_allow());
-        assert!(!decide_topic("domo", "sa-1", "domo.harbour.sa-1.reported", Some(&s)).is_allow());
-    }
-
-    #[test]
-    fn everything_denies_without_a_session() {
-        assert!(!decide_vhost("domo", None).is_allow());
-        assert!(!decide_resource("domo", "sa-1", "exchange", "amq.topic", None).is_allow());
-        assert!(!decide_topic("domo", "sa-1", "domo.lakeside.sa-1.x", None).is_allow());
-    }
-
-    #[test]
-    fn tenant_peek_reads_the_claim_without_verifying() {
-        use base64::Engine as _;
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(br#"{"sub":"sa-1","tenant_id":"t-9"}"#);
-        let jwt = format!("aGVhZGVy.{payload}.c2ln");
-        assert_eq!(peek_tenant_id(&jwt).as_deref(), Some("t-9"));
-        assert_eq!(peek_tenant_id("not-a-jwt"), None);
-    }
-
-    #[test]
-    fn the_wire_body_never_leaks_a_reason() {
-        assert_eq!(Decision::Allow.body(), "allow");
-        assert_eq!(Decision::Deny("anything at all").body(), "deny");
-    }
+async fn rmq_topic(
+    form: Result<web::Form<TopicReq>, actix_web::Error>,
+    st: web::Data<TwinState>,
+) -> HttpResponse {
+    let Ok(form) = form else {
+        return reply(Decision::Deny(DenyReason::MalformedRequest));
+    };
+    let r = form.into_inner();
+    reply(decide_topic(
+        &r.vhost,
+        &r.username,
+        &r.routing_key,
+        st.sessions.get(&r.username).as_ref(),
+    ))
 }

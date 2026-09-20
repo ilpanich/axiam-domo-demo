@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "device_twin"
+path = "src/lib.rs"
+
 [[bin]]
 name = "domo-twin"
 path = "src/main.rs"
@@ -29,3 +33,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+
+# Test-only. `wiremock` stands up the fake AXIAM key-set endpoint so the whole
+# suite runs offline; `jsonwebtoken` and `rcgen` sign fixture tokens locally so
+# expiry, audience, tenant and algorithm can each be varied independently —
+# real device tokens live ~900 s (P-13), which no fast test can wait out.
+[dev-dependencies]
+wiremock = { workspace = true }
+jsonwebtoken = { workspace = true }
+rcgen = { workspace = true }
