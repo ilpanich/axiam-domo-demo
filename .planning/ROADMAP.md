@@ -31,8 +31,8 @@ The demo is built as six horizontal technical layers, in dependency order: a fou
 **Plans**: 7 plans (4 waves)
 Plans:
 - [ ] 01-01-PLAN.md — Tracer: offline root → AXIAM BYOK import → tenant CA → device cert → mTLS login → accepted MQTT CONNECT (wave 1)
-- [ ] 01-02-PLAN.md — Whole-chain PKI verification, root export and trust docs, secrets guard (wave 2)
-- [ ] 01-03-PLAN.md — Caddy single origin, AXIAM console host, landing page, PostgreSQL (wave 2)
+- [ ] 01-02-PLAN.md — Whole-chain PKI verification, root export and trust docs, secrets guard, dogfooding findings log (wave 2)
+- [ ] 01-03-PLAN.md — Caddy single origin, AXIAM console host, landing page, PostgreSQL (wave 3)
 - [ ] 01-04-PLAN.md — AuthZ catalog, per-tenant admin, signing CAs, service credentials, resource tree and group pattern (wave 2)
 - [ ] 01-05-PLAN.md — Device Twin RabbitMQ auth backend: full four-endpoint contract with offline test suite (wave 2)
 - [ ] 01-06-PLAN.md — Smoke: live authorization assertions and the positive/negative device connect matrix (wave 3)

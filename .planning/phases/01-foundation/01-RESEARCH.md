@@ -759,21 +759,24 @@ async fn user(form: web::Form<UserReq>, st: web::Data<State>) -> impl Responder 
 | A11 | The default `enabled_plugins` of the management image includes management (+prometheus) | Code Ex. 3 | Management API missing if omitted; include it explicitly |
 | A12 | Org slug `domo`, ports 8443 (Twin), 8090 (AXIAM), file paths | Code examples | Cosmetic |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All five were answered before planning closed. Each carries its resolution inline; none is outstanding, and nothing below blocks the phase goal.
 
 1. **C-1..C-7 sign-off** (root as broker CA, DN-bound client_id, Ed25519 tenant CA, infra AMQP cert exception, Phase 2 management principal, hand-rolled device login, JwksVerifier).
-   - Recommendation: one `checkpoint:decision` task at the start of the phase, presenting the table above.
+   - Recommendation at research time: one `checkpoint:decision` task at the start of the phase, presenting the table above.
+   - **RESOLVED 2026-09-19 — by the user, in `01-CONTEXT.md`.** The corrections were presented and signed off directly rather than deferred to a checkpoint, and the amendments are recorded in CONTEXT.md as authoritative: D-11 ← C-3 (Ed25519 tenant signing CA), D-24 ← C-2 (client identifier bound to the certificate's distinguished name), D-26 ← C-1 (the organization root, not a tenant CA, is the broker's trust store), D-20 ← C-5 (the Phase 2 management principal), and the new D-37 ← C-4 (AXIAM's own AMQP client certificate is offline root-signed, the documented PKI-03 exception). C-6 (hand-rolled device login) and C-7 (`JwksVerifier` construction) are implemented as written in plans 01-01 and 01-05. No `checkpoint:decision` remains in any plan, deliberately: re-opening a decision the user already locked would contradict the phase context.
 2. **Topic `{device}` segment.**
    - What we know: SA-UUID-based topics make the backend self-contained.
-   - What's unclear: readable slugs (`domo/lakeside/smoke-light-1/…`) need a registry lookup, which is Phase 3's DB.
-   - Recommendation: Phase 1 uses `domo/{tenant_slug}/{sa_uuid}/…`; revisit in Phase 3 with the user. This costs little now, but Phase 4 simulators will bake it in.
+   - What's unclear at research time: readable slugs (`domo/lakeside/smoke-light-1/…`) need a registry lookup, which is Phase 3's DB.
+   - **RESOLVED — D-23 as amended.** Phase 1 uses `domo/{tenant_slug}/{sa_uuid}/…`, the service-account UUID form. Implemented in `crates/domo-common/src/topic.rs` (plan 01-01), hardened and unit-tested in plan 01-05, and asserted end to end by the namespace-escape cases in plan 01-06. Readable slugs are explicitly a Phase 3 question to re-open with the user; Phase 4's simulators will inherit whatever Phase 3 settles on.
 3. **Where tenant-admin credentials live and who uses them later.**
-   - Recommendation: `.secrets/axiam/tenant-admin-{slug}.json` (0600); Phase 2 decides whether the Management Platform uses them (C-5).
+   - **RESOLVED — D-37 plus plan 01-04 Task 2.** The credentials are persisted to `.secrets/axiam/tenant-admin-<slug>.json` at mode 0600, provisioned by `domo-bootstrap` through four hand-rolled calls carrying the acting-tenant header (the SDK sends none — DF-008). Whether the Management Platform reuses them is C-5's Phase 2 question and is out of this phase's scope.
 4. **AXIAM gRPC TLS config** (`50051`, for Phase 3 CheckAccess).
    - Not researched deeply. Only `AXIAM__SERVER__TLS__*` is documented.
-   - Recommendation: keep 50051 unpublished in Phase 1 and verify in Phase 3.
+   - **RESOLVED — deferred to Phase 3 by decision, not left open.** Port 50051 stays unpublished for the whole of Phase 1; no plan publishes it and no plan makes a gRPC call. Phase 3 verifies the TLS configuration when it first needs `CheckAccess`.
 5. **Firefox on Raspberry Pi OS trust path.**
-   - Recommendation: human-verify at end of phase (`human_verify_mode: end-of-phase`).
+   - **RESOLVED — covered by two `human-check` blocks**, consistent with `human_verify_mode: end-of-phase`: plan 01-02 Task 3 (confirm Chrome and Firefox show no warning once the root is trusted, and record which documented path was actually required, since A7 marks the p11-kit and Firefox behaviour as assumed) and plan 01-07 Task 3 (the same confirmation as part of walking `docs/setup.md` on a machine that has never run the demo). `docs/trust.md` documents both the OS trust-store path and the explicit `certutil` path so either outcome is already written down.
 
 ## Environment Availability
 
