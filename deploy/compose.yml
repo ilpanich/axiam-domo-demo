@@ -1,0 +1,314 @@
+# AXIAM Domo Demo — Phase 1 tracer stack.
+#
+# Adapted from ../axiam/docker/docker-compose.prod.yml (D-02). Every path below
+# is relative to this repository; nothing is built from, included from, or
+# bind-mounted out of a sibling checkout.
+#
+# Dropped from the analog: `vault` and `vault-data-perms` (secrets come from the
+# environment here, AXIAM__AUTH__SECRET_PROVIDER=env) and `axiam-frontend` (no
+# console in the tracer).
+#
+# # Environment-variable guards
+#
+# Every variable guard below (the "VAR colon question-mark" form) opens its
+# message with one of two words:
+#
+#   operator   You set it, by hand, in `.env`. Exactly five keys are in this
+#              class: AXIAM_IMAGE_TAG, DOMO_HOST, DOMO_LAN_IP, DOMO_ORG_SLUG,
+#              COMPOSE_PROJECT_NAME. Plan 01-07 documents these in `.env.example`
+#              and derives that list from this file alone.
+#   generated  `just` mints it into .secrets/generated.env. Never set it by
+#              hand — run `just up`.
+#
+# The generated keys keep their guards rather than taking a default on purpose:
+# a pepper or a JWT signing key that rendered empty would start AXIAM in a
+# silently insecure state, so nothing in the secret set is allowed to fall back.
+#
+# # AXIAM__ naming
+#
+# AXIAM's `load_config()` uses `__` as BOTH the prefix separator and the nested
+# key separator. Env vars must use a DOUBLE underscore after AXIAM
+# (`AXIAM__DB__URL`), or they are silently ignored and in-code defaults win.
+
+name: ${COMPOSE_PROJECT_NAME:?operator must set COMPOSE_PROJECT_NAME - see .env.example}
+
+services:
+  # ---------------------------------------------------------------------------
+  # One-shot: give the SurrealDB volume to the non-root server user.
+  # ---------------------------------------------------------------------------
+  surrealdb-init:
+    image: busybox
+    command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
+    volumes:
+      - surrealdb-data:/data
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # One-shot: publish the offline PKI into per-service volumes.
+  #
+  # P-6: Compose outside swarm IGNORES `secrets.*.uid/gid/mode`, so a 0600
+  # host-owned key bind-mounted straight into a container is unreadable by a
+  # non-root service user. Copying into a named volume and chown-ing there is
+  # the only way 0600 key material reaches these containers.
+  #
+  # Each service gets ONLY the key it needs. The root certificate is public and
+  # goes everywhere; no private key is shared between volumes.
+  # ---------------------------------------------------------------------------
+  tls-init:
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        # axiam-server (distroless nonroot: 65532)
+        cp /pki/root.pem /out/axiam/root.pem
+        cp /pki/axiam-server.pem /out/axiam/server.pem
+        cp /pki/axiam-server.key /out/axiam/server.key
+        cp /pki/axiam-amqp-client.pem /out/axiam/amqp-client.pem
+        cp /pki/axiam-amqp-client.key /out/axiam/amqp-client.key
+        chown -R 65532:65532 /out/axiam
+        chmod 0644 /out/axiam/root.pem /out/axiam/server.pem /out/axiam/amqp-client.pem
+        chmod 0600 /out/axiam/server.key /out/axiam/amqp-client.key
+        # rabbitmq (alpine image's rabbitmq user)
+        cp /pki/root.pem /out/rabbitmq/root.pem
+        cp /pki/rabbitmq.pem /out/rabbitmq/server.pem
+        cp /pki/rabbitmq.key /out/rabbitmq/server.key
+        chown -R ${RABBITMQ_UID:-100}:${RABBITMQ_GID:-101} /out/rabbitmq
+        chmod 0644 /out/rabbitmq/root.pem /out/rabbitmq/server.pem
+        chmod 0600 /out/rabbitmq/server.key
+        # device-twin (distroless nonroot: 65532)
+        cp /pki/root.pem /out/twin/root.pem
+        cp /pki/device-twin.pem /out/twin/server.pem
+        cp /pki/device-twin.key /out/twin/server.key
+        chown -R 65532:65532 /out/twin
+        chmod 0644 /out/twin/root.pem /out/twin/server.pem
+        chmod 0600 /out/twin/server.key
+        echo "tls-init: published PKI into 3 volumes"
+    volumes:
+      - ../.secrets/pki:/pki:ro
+      - axiam-tls:/out/axiam
+      - rabbitmq-tls:/out/rabbitmq
+      - twin-tls:/out/twin
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # SurrealDB — AXIAM's datastore.
+  # ---------------------------------------------------------------------------
+  surrealdb:
+    image: surrealdb/surrealdb:v3
+    depends_on:
+      surrealdb-init:
+        condition: service_completed_successfully
+    # Without a PATH arg the default is `memory`, which wipes all state on every
+    # restart and would lose the single-use setup token with it (DF-019).
+    command: start --user ${AXIAM__DB__USERNAME:?generated - run 'just up', which mints it into .secrets/generated.env} --pass ${AXIAM__DB__PASSWORD:?generated - run 'just up', which mints it into .secrets/generated.env} --log info surrealkv:/data/axiam.db
+    volumes:
+      - surrealdb-data:/data
+    healthcheck:
+      test: ["CMD", "/surreal", "isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # AXIAM — the single IAM.
+  # ---------------------------------------------------------------------------
+  axiam-server:
+    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:?operator must set AXIAM_IMAGE_TAG - see .env.example}
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      tls-init:
+        condition: service_completed_successfully
+    ports:
+      # D-05: devices reach AXIAM's own TLS listener directly, so this is
+      # published on the LAN rather than the loopback. AXIAM's forwarded-client-
+      # certificate path stays off (T-01-05) precisely because of this.
+      - "${DOMO_LAN_IP:?operator must set DOMO_LAN_IP - see .env.example}:8090:8090"
+    environment:
+      # SurrealDB v3's Rust SDK takes a bare host:port, NOT a URL scheme.
+      AXIAM__DB__URL: "surrealdb:8000"
+      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__DB__NAMESPACE: "axiam"
+      AXIAM__DB__DATABASE: "axiam"
+
+      AXIAM__SERVER__HOST: "0.0.0.0"
+      AXIAM__GRPC__HOST: "0.0.0.0"
+
+      # --- Native TLS with optional client certificates ---------------------
+      # `optional` lets ONE listener serve both ordinary TLS callers and devices
+      # presenting a client certificate. CLIENT_CA_PATH is mandatory whenever
+      # CLIENT_AUTH is optional/required: without it startup aborts with
+      # "server.tls.client_auth is optional/required but server.tls.client_ca_path
+      # is not set". The root exists before boot, so this is static — no restart
+      # dance.
+      AXIAM__SERVER__TLS__ENABLED: "true"
+      AXIAM__SERVER__TLS__CERT_PATH: "/etc/axiam/tls/server.pem"
+      AXIAM__SERVER__TLS__KEY_PATH: "/etc/axiam/tls/server.key"
+      AXIAM__SERVER__TLS__CLIENT_AUTH: "optional"
+      AXIAM__SERVER__TLS__CLIENT_CA_PATH: "/etc/axiam/tls/root.pem"
+
+      # --- AMQPS to the broker ----------------------------------------------
+      # T-01-06: the broker now demands a client certificate from EVERY peer
+      # (fail_if_no_peer_cert = true), AXIAM's own link included. Both the cert
+      # and the key must be set; the half-set combination fails closed.
+      AXIAM__AMQP__URL: "amqps://${RABBITMQ_DEFAULT_USER:?generated - run 'just up' instead of raw docker compose}:${RABBITMQ_DEFAULT_PASS:?generated - run 'just up' instead of raw docker compose}@rabbitmq:5671"
+      AXIAM__AMQP__TLS__CA_CERT_PATH: "/etc/axiam/tls/root.pem"
+      AXIAM__AMQP__TLS__CLIENT_CERT_PATH: "/etc/axiam/tls/amqp-client.pem"
+      AXIAM__AMQP__TLS__CLIENT_KEY_PATH: "/etc/axiam/tls/amqp-client.key"
+      AXIAM__AMQP__SIGNING_KEY: "${AXIAM__AMQP__SIGNING_KEY:?generated - run 'just up' instead of raw docker compose}"
+
+      # --- Secrets from the environment (no Vault in this demo) -------------
+      AXIAM__AUTH__SECRET_PROVIDER: "env"
+      AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__MFA_ENCRYPTION_KEY: "${AXIAM__AUTH__MFA_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY: "${AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      # Phase 5 needs OPAQUE. With only one of these set, OPAQUE answers 503, so
+      # both are set from first boot.
+      AXIAM__AUTH__OPAQUE_SESSION_KEY: "${AXIAM__AUTH__OPAQUE_SESSION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__OPAQUE_SETUP_KEY: "${AXIAM__AUTH__OPAQUE_SETUP_KEY:?generated - run 'just up' instead of raw docker compose}"
+      # P-9: the running image has been seen to honour either spelling of the
+      # PKI encryption key. Both are set to the SAME 64-hex value so the BYOK
+      # import cannot fail on a name mismatch; the summary records which one the
+      # pulled tag actually used.
+      AXIAM__AUTH__PKI_ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__PKI__ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?generated - run 'just up' instead of raw docker compose}"
+
+      AXIAM__AUTH__WEBAUTHN_RP_ID: "${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
+      AXIAM__AUTH__WEBAUTHN_RP_ORIGIN: "https://${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
+      # No proxy in front of :8090 in the tracer — devices reach it directly.
+      AXIAM__RATE_LIMIT__TRUSTED_HOPS: "0"
+      RUST_LOG: "${RUST_LOG:-axiam=info}"
+    volumes:
+      - axiam-tls:/etc/axiam/tls:ro
+    # P-4: the shipped healthcheck subcommand probes plain HTTP and its reqwest
+    # client trusts only webpki roots, so it cannot reach a TLS listener fronted
+    # by a private CA — it would mark a perfectly healthy server unhealthy
+    # forever. `just` polls `curl --cacert .secrets/pki/root.pem
+    # https://127.0.0.1:8090/health` instead, and dependents use service_started.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # RabbitMQ — AXIAM's broker, plus the `domo` MQTT vhost.
+  #
+  # D-26: AXIAM's own `/` vhost, its entrypoint-created default user and its
+  # `auth_backends.1 = internal` path are never modified. The `domo` vhost is
+  # added alongside them by the `broker` bootstrap stage.
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:4.3-management-alpine
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    ports:
+      - "${DOMO_LAN_IP:?operator must set DOMO_LAN_IP - see .env.example}:8883:8883"
+      # Management API on the loopback only — operator tooling and the
+      # acceptance gate's `GET /api/connections` check.
+      - "127.0.0.1:15672:15672"
+    environment:
+      # Applied only on the FIRST boot of an empty rabbitmq-data volume, which
+      # is why they are persisted in .secrets/generated.env rather than
+      # regenerated per run.
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?generated - run 'just up' instead of raw docker compose}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?generated - run 'just up' instead of raw docker compose}"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - rabbitmq-tls:/etc/rabbitmq/tls:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./rabbitmq/20-tls.conf:/etc/rabbitmq/conf.d/20-tls.conf:ro
+      - ./rabbitmq/30-mqtt.conf:/etc/rabbitmq/conf.d/30-mqtt.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # Device Twin — RabbitMQ's HTTP authorization backend.
+  #
+  # Unpublished (T-01-07): reachable only on the compose network, and the broker
+  # verifies it against the organization root over TLS 1.3.
+  # ---------------------------------------------------------------------------
+  device-twin:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.rust
+      target: twin
+    image: domo-twin:${DOMO_IMAGE_TAG:-dev}
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    environment:
+      DOMO_TWIN_BIND: "0.0.0.0:8443"
+      DOMO_TWIN_CERT: "/etc/domo/tls/server.pem"
+      DOMO_TWIN_KEY: "/etc/domo/tls/server.key"
+      DOMO_ROOT_CA: "/etc/domo/tls/root.pem"
+      DOMO_AXIAM_URL: "https://axiam-server:8090"
+      DOMO_MQTT_VHOST: "domo"
+      # tenant_id -> slug, written by the `tenants` bootstrap stage. The Twin
+      # re-reads it on a cache miss, so later plans add tenants without a
+      # restart.
+      DOMO_TENANT_MAP_FILE: "/etc/domo/state/tenants.json"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - twin-tls:/etc/domo/tls:ro
+      - ../.secrets/state:/etc/domo/state:ro
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # Bootstrap / probe tooling — one-shot, never started by `up`.
+  #
+  # Run as `docker compose run --rm domo-bootstrap <stage>`. Running the API
+  # work on the compose network is what lets the Pi bootstrap the demo with no
+  # cargo toolchain installed (D-35), and lets these binaries reach
+  # `axiam-server` and `rabbitmq` by service name.
+  # ---------------------------------------------------------------------------
+  domo-bootstrap:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.rust
+      target: tools
+    image: domo-tools:${DOMO_IMAGE_TAG:-dev}
+    profiles: ["tools"]
+    environment:
+      DOMO_AXIAM_URL: "https://axiam-server:8090"
+      DOMO_RABBITMQ_MGMT_URL: "http://rabbitmq:15672"
+      DOMO_ROOT_CA: "/etc/domo/pki/root.pem"
+      DOMO_SECRETS_DIR: "/domo/.secrets"
+      DOMO_ORG_SLUG: "${DOMO_ORG_SLUG:?operator must set DOMO_ORG_SLUG - see .env.example}"
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?generated - run 'just up' instead of raw docker compose}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?generated - run 'just up' instead of raw docker compose}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      # The tools write issued certificates and admin credentials back to the
+      # host `.secrets/` tree, so this one mount is read-write by design.
+      - ../.secrets:/domo/.secrets
+      - ../.secrets/pki:/etc/domo/pki:ro
+    networks: [domo-network]
+
+volumes:
+  surrealdb-data:
+  rabbitmq-data:
+  axiam-tls:
+  rabbitmq-tls:
+  twin-tls:
+
+networks:
+  domo-network:
+    driver: bridge
