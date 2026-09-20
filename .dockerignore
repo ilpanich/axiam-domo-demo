@@ -1,0 +1,25 @@
+# T-01-03: the offline root private key must never enter a build context or an
+# image layer. The acceptance gate streams every produced image through
+# `docker save` and asserts a count of zero for the PEM private-key header.
+.secrets/
+**/*.pem
+**/*.key
+**/*.csr
+**/*.p12
+**/*.pfx
+
+# Build outputs — never ship a host `target/` into a build context.
+target/
+dist/
+build/
+
+.env
+
+# Not needed by any image build.
+.git/
+.gsd/
+.claude/
+.planning/
+docs/
+DEFINITIONS.md
+*.md

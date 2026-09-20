@@ -1,0 +1,23 @@
+# Runtime secrets: the offline root key, every issued leaf, AXIAM admin
+# credentials, the setup token and the generated compose env. PKI-06 asserts
+# `git ls-files .secrets` stays empty — nothing here is ever committed.
+.secrets/
+
+# Belt and braces: no key or certificate material anywhere in the tree.
+**/*.pem
+**/*.key
+**/*.csr
+**/*.p12
+**/*.pfx
+
+# Build outputs (disk hygiene: these are cleaned after each component build).
+target/
+dist/
+build/
+
+# Local operator environment. `.env.example` is committed; `.env` never is.
+.env
+
+# Editor / OS noise
+.DS_Store
+*.swp
