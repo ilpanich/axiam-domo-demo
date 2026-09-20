@@ -313,3 +313,27 @@ Ready for 01-06, with the live-verification caveat above resolved first — 01-0
 ---
 *Phase: 01-foundation*
 *Completed: 2026-09-20*
+
+## TDD Gate Compliance
+
+Both TDD tasks completed the full sequence, RED before GREEN, each RED committed on its own.
+
+| Task | RED | GREEN | REFACTOR | RED evidence |
+| --- | --- | --- | --- | --- |
+| 1 — catalog | `49dfee8` ✓ | `bb1de6a` ✓ | — (none needed) | `RED_EVIDENCE_OK`, target `a_role_yields_exactly_the_grants_it_declares`, exit 101, 10/10 failed |
+| 3 — naming | `6323cda` ✓ | `4825fbb` ✓ | — (none needed) | `RED_EVIDENCE_OK`, target `resource_names_are_readable_and_type_prefixed`, exit 101, 9/12 failed |
+
+Task 2 is exempt: it is live provisioning against AXIAM with no pure behaviour to assert in-process. Its guarantees are a `compile_fail` doctest and the `authz-verify` assertions.
+
+No violations. One honest note on Task 3's RED: three of its twelve tests passed against the stub, because they assert empty sets (`a_device_gets_no_eager_group`, `a_building_gets_no_eager_group`) or compare two then-empty sets (`the_group_scheme_agrees_with_the_catalog_templates`). A do-nothing stub satisfies those vacuously; they gained their teeth in the GREEN commit, where both sides became non-empty. The target test failed on a real assertion, which is what authorised GREEN.
+
+## Self-Check: PASSED
+
+- All 12 claimed key files exist on disk.
+- All 6 commits resolve in `git log` from the plan base `5e23f5f`: `49dfee8`, `bb1de6a`, `0777644`, `6323cda`, `4825fbb`, and this summary's own metadata commit. The frontmatter's `commits: 5` is the measured production count at SUMMARY-write time, before the metadata commit.
+- `cargo test --workspace --locked` green: 44 tests, 0 failures, across `domo-common`, `domo-bootstrap` (14 catalog + 12 naming + 1 compile_fail doctest) and `domo-probe`.
+- `cargo build -p domo-bootstrap --locked` clean, no warnings.
+- `grep -v '^#' authz/catalog.toml | grep -c '[*]'` → `0`.
+- Scope: nothing under `services/device-twin/`, `crates/domo-common/src/topic.rs`, `just/pki.just`, `scripts/`, `.githooks/` or `docs/` was touched — no overlap with plan 01-02 or 01-05. `.planning/STATE.md` and `.planning/ROADMAP.md` were not modified.
+- **Not verified:** every live assertion. See Deferred Verification above — this is the plan's one open gap, and it is recorded rather than glossed.
+- Disk hygiene: `df` checked before the first `cargo` invocation (33 GB free, both bounds met) and after (24 GB on `/home`, 35 GB on `/`), never near the 8 GB floor. This worktree's `target/` reached 3.5 GB and is left in place for the orchestrator's removal of the worktree, since deleting it while a sibling executor may still be building would be the one unsafe cleanup.
