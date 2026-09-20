@@ -43,6 +43,47 @@ hooks-install:
     @git config core.hooksPath .githooks
     @echo "  ✓ core.hooksPath = $(git config core.hooksPath)"
 
+# --- trust export (PKI-05, D-14) ---------------------------------------------
+
+# Write the PUBLIC root certificate to dist/trust/ as PEM and DER with its
+# SHA-256 fingerprint, then print the per-target import steps.
+#
+# The PRIVATE key is never touched and never copied. Nothing here starts a
+# server: the root is deliberately NOT offered over HTTP for one-click
+# download — the user considered that and rejected it (D-14). Distribution is
+# this recipe plus the documented steps in docs/trust.md, and nothing else.
+export-trust:
+    @echo "→ exporting the organization root"
+    @test -s .secrets/pki/root.pem || { echo "✗ .secrets/pki/root.pem is missing — run 'just pki' first"; exit 1; }
+    @mkdir -p dist/trust
+    @cp .secrets/pki/root.pem dist/trust/domo-root.pem
+    @openssl x509 -in .secrets/pki/root.pem -outform der -out dist/trust/domo-root.der
+    @openssl x509 -noout -fingerprint -sha256 -in .secrets/pki/root.pem > dist/trust/domo-root.sha256
+    @chmod 644 dist/trust/domo-root.pem dist/trust/domo-root.der dist/trust/domo-root.sha256
+    @# Self-check rather than a claim: the DER must round-trip to the in-use
+    @# PEM byte for byte, or the two files a reviewer compares disagree.
+    @openssl x509 -inform der -in dist/trust/domo-root.der | diff - .secrets/pki/root.pem >/dev/null \
+        || { echo "✗ dist/trust/domo-root.der does not round-trip to the in-use root"; exit 1; }
+    @test ! -e dist/trust/domo-root.key || { echo "✗ private key material found in dist/trust/ — refusing"; exit 1; }
+    @echo "  ✓ dist/trust/domo-root.pem     PEM, for OS trust stores and certutil"
+    @echo "  ✓ dist/trust/domo-root.der     DER, same bytes, for tools that want it"
+    @echo "  ✓ dist/trust/domo-root.sha256  the fingerprint to compare before trusting"
+    @echo ""
+    @echo "  Fingerprint — compare this against the landing page before you trust anything:"
+    @echo ""
+    @sed 's/^/    /' dist/trust/domo-root.sha256
+    @echo ""
+    @echo "  Import it (full instructions, including how to confirm and how to remove: docs/trust.md):"
+    @echo ""
+    @echo "    ArchLinux         sudo trust anchor --store dist/trust/domo-root.pem"
+    @echo "    Debian / Pi OS    sudo cp dist/trust/domo-root.pem /usr/local/share/ca-certificates/domo-root.crt"
+    @echo "                      sudo update-ca-certificates"
+    @echo "    Chrome/Chromium   certutil -d sql:\$HOME/.pki/nssdb -A -t \"C,,\" -n \"Domo Demo Root\" -i dist/trust/domo-root.pem"
+    @echo "    Firefox           Settings → Privacy & Security → Certificates → View Certificates"
+    @echo "                      → Authorities → Import, tick \"Trust this CA to identify websites\""
+    @echo ""
+    @echo "  Rotating the root ('just pki-rotate-root') invalidates every import above."
+
 # --- rotation (COSTLY — never called by reset) -------------------------------
 
 # Destroy the organization root and start a completely fresh PKI.
