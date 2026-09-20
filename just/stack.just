@@ -102,9 +102,9 @@ secrets:
 
 # --- lifecycle ---------------------------------------------------------------
 
-pki:
-    @echo "→ offline PKI"
-    @set -a; [ -f .env ] && . ./.env; set +a; scripts/gen-pki.sh
+# `pki` lives in `just/pki.just` alongside `verify-pki` and `pki-rotate-root`.
+# `just` flattens imports into a single namespace, so the dependency below
+# resolves across the module boundary and defining it twice is an error.
 
 # Both images. `domo-bootstrap` sits in the `tools` profile so it never starts
 # with `up`, but it still has to be BUILT — and `domo-probe` reuses the image it
