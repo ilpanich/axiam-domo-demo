@@ -116,6 +116,14 @@ pub async fn run() -> Result<()> {
     }
 
     for tenant in tenants {
+        // `organization` is AXIAM's reserved org-level tenant (CONTRACT §5.2.1),
+        // not a demo tenant. It holds no devices, so minting a signing CA for it
+        // would be an object nobody issues from — and would break the
+        // "one signing CA per tenant, no more and no fewer" count (PKI-02).
+        if tenant.slug == domo_common::ORG_TENANT_SLUG {
+            continue;
+        }
+
         let existing = sdk
             .ca_certificates()
             .in_org(org_id)
@@ -142,7 +150,10 @@ pub async fn run() -> Result<()> {
                         // KeyAlgorithm::Rsa4096 — but record the finding first.
                         key_algorithm: KeyAlgorithm::Ed25519,
                         parent_ca_id: root_ca.id,
-                        subject: format!("CN={} Signing CA", tenant.name),
+                        // The bare common name, NOT "CN=<name>": AXIAM builds
+                        // the DN itself, so passing a prefixed value yields a
+                        // subject of `CN=CN=<name>` (observed at runtime).
+                        subject: format!("{} Signing CA", tenant.name),
                         validity_days: SIGNING_CA_DAYS,
                     },
                 )

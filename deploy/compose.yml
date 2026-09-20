@@ -84,12 +84,20 @@ services:
         chown -R 65532:65532 /out/twin
         chmod 0644 /out/twin/root.pem /out/twin/server.pem
         chmod 0600 /out/twin/server.key
+        # Shared runtime state: the bootstrap (host uid) writes the tenant map
+        # here and the Twin (65532) reads it. A named volume rather than a bind
+        # mount of `.secrets/state`, because that tree is 0700 by design — it
+        # holds the organization root key — and must NOT be opened up just so a
+        # non-secret lookup table can be read out of it.
+        chown ${DOMO_UID:-1000}:${DOMO_GID:-1000} /out/state
+        chmod 0755 /out/state
         echo "tls-init: published PKI into 3 volumes"
     volumes:
       - ../.secrets/pki:/pki:ro
       - axiam-tls:/out/axiam
       - rabbitmq-tls:/out/rabbitmq
       - twin-tls:/out/twin
+      - twin-state:/out/state
     restart: "no"
 
   # ---------------------------------------------------------------------------
@@ -127,9 +135,14 @@ services:
         condition: service_completed_successfully
     ports:
       # D-05: devices reach AXIAM's own TLS listener directly, so this is
-      # published on the LAN rather than the loopback. AXIAM's forwarded-client-
-      # certificate path stays off (T-01-05) precisely because of this.
+      # published on the LAN rather than only the loopback. AXIAM's
+      # forwarded-client-certificate path stays off (T-01-05) precisely because
+      # of this.
       - "${DOMO_LAN_IP:?operator must set DOMO_LAN_IP - see .env.example}:8090:8090"
+      # Also on the loopback, so operator tooling and the readiness poll work
+      # on a machine whose LAN address changes (a laptop moving networks) —
+      # which is exactly when a LAN-only binding fails most confusingly.
+      - "127.0.0.1:8090:8090"
     environment:
       # SurrealDB v3's Rust SDK takes a bare host:port, NOT a URL scheme.
       AXIAM__DB__URL: "surrealdb:8000"
@@ -181,8 +194,29 @@ services:
       # pulled tag actually used.
       AXIAM__AUTH__PKI_ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
       AXIAM__PKI__ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      # Both spellings, same value — the P-9 pattern again. With only the
+      # unprefixed name set, the running image logs
+      # "AXIAM__EMAIL_ENCRYPTION_KEY missing" and "GDPR purge sweep skipped"
+      # even though the variable is demonstrably present in the container: the
+      # env secret provider resolves logical keys under `AXIAM__AUTH__<NAME>`.
+      # Neither key is on the tracer's path, but leaving a silently-ignored
+      # secret in place is how the next person loses an afternoon.
       AXIAM__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__EMAIL_ENCRYPTION_KEY: "${AXIAM__EMAIL_ENCRYPTION_KEY:?generated - run 'just up' instead of raw docker compose}"
       AXIAM__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?generated - run 'just up' instead of raw docker compose}"
+      AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER: "${AXIAM__GDPR_PSEUDONYM_PEPPER:?generated - run 'just up' instead of raw docker compose}"
+
+      # --- Rate limiting -----------------------------------------------------
+      # The staged bootstrap logs in roughly eight times per `just tracer` run
+      # (each stage is a separate one-shot process and must establish its own
+      # session), so AXIAM's shipped default of 10 logins/minute makes the
+      # plan's "run twice in a row" acceptance criterion impossible: the second
+      # run fails partway through with what looks like an authentication bug.
+      #
+      # Raised deliberately, and ONLY defensible because this is a LAN-only
+      # demo with no internet exposure. Do not carry this value into anything
+      # reachable from a network you do not own.
+      AXIAM__RATE_LIMIT__LOGIN_PER_MIN: "${AXIAM_LOGIN_PER_MIN:-120}"
 
       AXIAM__AUTH__WEBAUTHN_RP_ID: "${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
       AXIAM__AUTH__WEBAUTHN_RP_ORIGIN: "https://${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
@@ -267,7 +301,7 @@ services:
       RUST_LOG: "${RUST_LOG:-info}"
     volumes:
       - twin-tls:/etc/domo/tls:ro
-      - ../.secrets/state:/etc/domo/state:ro
+      - twin-state:/etc/domo/state:ro
     restart: unless-stopped
     networks: [domo-network]
 
@@ -306,6 +340,7 @@ services:
       # host `.secrets/` tree, so this one mount is read-write by design.
       - ../.secrets:/domo/.secrets
       - ../.secrets/pki:/etc/domo/pki:ro
+      - twin-state:/domo/state
     networks: [domo-network]
 
   # ---------------------------------------------------------------------------
@@ -339,6 +374,7 @@ volumes:
   axiam-tls:
   rabbitmq-tls:
   twin-tls:
+  twin-state:
 
 networks:
   domo-network:

@@ -28,6 +28,8 @@ const KEY_PATH: &str = "probe/device.key";
 const CSR_PATH: &str = "probe/device.csr";
 const LEAF_PATH: &str = "probe/leaf.pem";
 const SA_ID_PATH: &str = "probe/sa-id";
+/// Records which account the on-disk keypair was generated for.
+const CSR_FOR_PATH: &str = "probe/csr-for";
 
 #[derive(Parser)]
 #[command(name = "domo-probe", about = "Simulated device for the Phase 1 tracer")]
@@ -62,6 +64,19 @@ fn gen_csr() -> Result<()> {
     let sa_id = domo_common::secrets::read_string(SA_ID_PATH)
         .context("no device account id on disk — run the device-account stage first")?;
 
+    // Idempotent per account. Minting a fresh keypair on every run would
+    // silently break the second run: `device-identity` reuses the certificate
+    // already bound to this account, and that certificate belongs to the OLD
+    // key — so the mTLS identity would no longer be a matching pair. A new key
+    // is generated only when the account itself is new.
+    if domo_common::secrets::exists(KEY_PATH)
+        && domo_common::secrets::exists(CSR_PATH)
+        && domo_common::secrets::read_string(CSR_FOR_PATH).ok().as_deref() == Some(&sa_id)
+    {
+        println!("  ✓ keypair and CSR already exist for CN={sa_id} — reusing");
+        return Ok(());
+    }
+
     println!("  → generating an Ed25519 keypair (the key never leaves this host)");
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
         .context("generating the device keypair")?;
@@ -81,6 +96,7 @@ fn gen_csr() -> Result<()> {
     // PKCS#8. Written at 0600 by the secrets helper.
     domo_common::secrets::write_string(KEY_PATH, &key.serialize_pem())?;
     domo_common::secrets::write_string(CSR_PATH, &csr.pem().context("encoding the CSR")?)?;
+    domo_common::secrets::write_string(CSR_FOR_PATH, &sa_id)?;
     println!("  ✓ CSR ready for CN={sa_id}");
     Ok(())
 }
@@ -223,11 +239,15 @@ async fn connect() -> Result<()> {
     if !subscribed {
         bail!("never received a SubAck — the broker refused the subscription");
     }
-    if !published {
-        bail!("never received a PubAck — the broker refused the publish");
-    }
+    // The round trip is strictly stronger evidence than the PubAck: a message
+    // that came back was, necessarily, published. The broker may deliver the
+    // subscribed copy BEFORE the acknowledgement, so requiring the PubAck first
+    // would fail a run that in fact proved more than the PubAck ever could.
     if !round_tripped {
-        bail!("published and subscribed, but the message never came back");
+        if published {
+            bail!("publish was acknowledged, but the message never came back");
+        }
+        bail!("never received a PubAck — the broker refused the publish");
     }
 
     client.disconnect().await.ok();

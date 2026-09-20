@@ -110,6 +110,16 @@ async fn healthz() -> impl Responder {
 async fn rmq_user(form: web::Form<UserReq>, st: web::Data<AppState>) -> impl Responder {
     let r = form.into_inner();
 
+    // Identity fields only — never `r.password`, which is the access token
+    // (T-01-04). Without this, a denial is invisible: the broker reports only
+    // "Denied by the backing HTTP service" and the reason dies here.
+    tracing::debug!(
+        username = %r.username,
+        client_id = ?r.client_id,
+        vhost = ?r.vhost,
+        "CONNECT attempt"
+    );
+
     // Pre-flight the cheap, purely local hops before spending a JWKS fetch on a
     // request that cannot succeed anyway.
     let prelim = decide_user(&UserFacts {

@@ -90,6 +90,14 @@ pub fn write_string(relative: impl AsRef<Path>, s: &str) -> Result<PathBuf> {
     write(relative, s.as_bytes())
 }
 
+// NOTE: there is deliberately no "write a 0644 file into .secrets/" helper.
+// This tree is 0700 because it holds the organization root key, so a
+// world-readable file inside it would still be unreachable by another uid —
+// the mode would look permissive while the directory denied traversal, which
+// is the most confusing possible failure. Artifacts that a differently-uid'd
+// service must read (the Twin's tenant map) go into a shared volume instead;
+// see the `twin-state` volume in deploy/compose.yml.
+
 /// Record that a bootstrap stage completed.
 ///
 /// Markers are a skip *hint* only — every stage resolves its objects by natural

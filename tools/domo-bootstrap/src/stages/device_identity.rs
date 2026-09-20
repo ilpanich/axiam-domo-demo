@@ -74,6 +74,29 @@ async fn resolve_tenant_ca(env: &Env, tenant_slug: &str) -> Result<(Uuid, Uuid)>
     Ok((tenant.id, ca.id))
 }
 
+/// True when a CSR and a certificate carry the same public key.
+///
+/// Compared as raw SubjectPublicKeyInfo bytes, which is the one representation
+/// that cannot disagree on encoding details. A parse failure returns `false`:
+/// if we cannot prove they match, we must not reuse.
+fn public_keys_match(csr_pem: &str, cert_pem: &str) -> bool {
+    use x509_parser::prelude::{FromDer, X509Certificate, X509CertificationRequest};
+
+    let Ok((_, csr_block)) = x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()) else {
+        return false;
+    };
+    let Ok((_, csr)) = X509CertificationRequest::from_der(&csr_block.contents) else {
+        return false;
+    };
+    let Ok((_, cert_block)) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()) else {
+        return false;
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(&cert_block.contents) else {
+        return false;
+    };
+    csr.certification_request_info.subject_pki.raw == cert.tbs_certificate.subject_pki.raw
+}
+
 /// Phase 1 — create (or find) the device's service account.
 pub async fn ensure_account(name: &str, tenant_slug: &str) -> Result<Uuid> {
     let env = Env::load()?;
@@ -161,6 +184,12 @@ pub async fn sign(csr_path: &str, out_path: &str, tenant_slug: &str) -> Result<(
     if let Some(found) = existing
         .iter()
         .find(|c| c.bound_service_account_id == Some(sa_id))
+        // Reuse ONLY if that certificate belongs to the key the device is
+        // holding right now. A certificate bound to the right account but
+        // issued for an older keypair is worse than no certificate: it builds
+        // an mTLS identity whose key and leaf disagree, and the failure
+        // surfaces far away, as "building the device HTTP client".
+        .filter(|c| public_keys_match(&csr_pem, &c.public_cert_pem))
     {
         step("device certificate already issued and bound — reusing");
         std::fs::write(out_path, &found.public_cert_pem)

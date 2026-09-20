@@ -1,0 +1,57 @@
+# Rust images for the Domo demo: the Device Twin and the bootstrap/probe tools.
+#
+# Native platform only. The arm64 cross-build (a `--platform=$BUILDPLATFORM`
+# builder stage cross-compiling to aarch64, rather than a QEMU-emulated rustc)
+# is plan 01-07's work.
+#
+# The build context is the repository root and `.dockerignore` excludes
+# `.secrets/`, `**/*.pem` and `**/*.key`, so no key material can reach a layer
+# here (T-01-03). The acceptance gate proves it by streaming both produced
+# images through `docker save` and counting PEM private-key headers.
+
+FROM rust:1.98-bookworm AS builder
+
+# `aws-lc-sys` (rustls' default crypto provider) compiles C and needs cmake and
+# a C compiler. Without these the build fails deep inside a build script with a
+# message that does not name the missing tool.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake clang \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Manifests first, so a source-only change does not re-resolve dependencies.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/domo-common/Cargo.toml crates/domo-common/
+COPY tools/domo-bootstrap/Cargo.toml tools/domo-bootstrap/
+COPY tools/domo-probe/Cargo.toml tools/domo-probe/
+COPY services/device-twin/Cargo.toml services/device-twin/
+
+COPY crates crates
+COPY tools tools
+COPY services services
+
+# `--locked` is the supply-chain half of T-01-08: the lockfile decides, and a
+# drifted dependency fails the build instead of silently entering an image.
+RUN cargo build --release --locked --workspace
+
+# -----------------------------------------------------------------------------
+# Device Twin
+# -----------------------------------------------------------------------------
+FROM gcr.io/distroless/cc-debian12:nonroot AS twin
+COPY --from=builder --chown=65532:65532 /src/target/release/domo-twin /usr/local/bin/domo-twin
+USER 65532:65532
+EXPOSE 8443
+ENTRYPOINT ["/usr/local/bin/domo-twin"]
+
+# -----------------------------------------------------------------------------
+# Bootstrap + probe
+#
+# One image, two binaries. Compose selects between them with `entrypoint:`,
+# because distroless has no shell to dispatch with.
+# -----------------------------------------------------------------------------
+FROM gcr.io/distroless/cc-debian12:nonroot AS tools
+COPY --from=builder --chown=65532:65532 /src/target/release/domo-bootstrap /usr/local/bin/domo-bootstrap
+COPY --from=builder --chown=65532:65532 /src/target/release/domo-probe /usr/local/bin/domo-probe
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/domo-bootstrap"]

@@ -85,7 +85,19 @@ pub async fn run() -> Result<()> {
     // slug its topic scheme is keyed by. It re-reads on a miss, so writing it
     // here is enough — no Twin restart required.
     let json = serde_json::to_vec_pretty(&map).context("serializing the tenant map")?;
-    domo_common::secrets::write("state/tenants.json", &json)?;
+    // Written into the volume shared with the Twin, NOT into `.secrets/`: that
+    // tree is 0700 because it holds the organization root key, and the Twin
+    // runs as a different uid. A tenant slug is public in every topic name, so
+    // there is nothing here that wants secret handling — only a reader under
+    // another uid.
+    let state_dir = std::env::var("DOMO_TWIN_STATE_DIR")
+        .unwrap_or_else(|_| "/domo/state".to_owned());
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("creating {state_dir}"))?;
+    let path = std::path::Path::new(&state_dir).join("tenants.json");
+    std::fs::write(&path, &json).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+        .with_context(|| format!("chmod 644 {}", path.display()))?;
     ok("tenant map written for the Device Twin");
 
     domo_common::secrets::mark_done("tenants")?;
