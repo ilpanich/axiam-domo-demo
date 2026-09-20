@@ -8,6 +8,7 @@ pub mod pki;
 pub mod service_certs;
 pub mod tenant_admin;
 pub mod tenants;
+pub mod tree;
 
 use std::ops::Deref;
 
@@ -306,6 +307,7 @@ pub async fn verify_all() -> Result<()> {
     let mut passed = true;
     passed &= tenants::verify(&org, &env).await?;
     passed &= pki::verify(&org).await?;
+    passed &= tree::verify(&org, &env).await?;
     passed &= service_certs::verify(&org, &env).await?;
 
     anyhow::ensure!(passed, "authz-verify found at least one broken invariant");
