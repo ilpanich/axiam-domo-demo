@@ -336,6 +336,10 @@ services:
       DOMO_RABBITMQ_MGMT_URL: "http://rabbitmq:15672"
       DOMO_ROOT_CA: "/etc/domo/pki/root.pem"
       DOMO_SECRETS_DIR: "/domo/.secrets"
+      # Absolute, never relative. The `tools` image is distroless with no
+      # WORKDIR, so the binary's relative default (`authz/catalog.toml`)
+      # resolves against `/` and cannot be found.
+      DOMO_CATALOG: "/domo/authz/catalog.toml"
       DOMO_ORG_SLUG: "${DOMO_ORG_SLUG:?operator must set DOMO_ORG_SLUG - see .env.example}"
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:?generated - run 'just up' instead of raw docker compose}"
       RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:?generated - run 'just up' instead of raw docker compose}"
@@ -345,6 +349,9 @@ services:
       # host `.secrets/` tree, so this one mount is read-write by design.
       - ../.secrets:/domo/.secrets
       - ../.secrets/pki:/etc/domo/pki:ro
+      # The declarative authorization catalog (D-16). Read-only: the `catalog`
+      # stage applies this file to AXIAM, it never writes it back.
+      - ../authz:/domo/authz:ro
       - twin-state:/domo/state
     networks: [domo-network]
 
