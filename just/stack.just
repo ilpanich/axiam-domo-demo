@@ -113,9 +113,18 @@ build:
     @echo "→ building images"
     @just _dc build device-twin domo-bootstrap
 
-up: preflight secrets pki build
+# `export-trust` (just/pki.just) is a dependency, not a convenience: the `caddy`
+# service bind-mounts dist/trust/domo-root.sha256 as the landing page's
+# fingerprint source, and Docker silently creates a DIRECTORY at a bind-mount
+# target whose source does not exist. Exporting first is what keeps that from
+# becoming a 500 on `/` that looks like a template bug.
+up: preflight secrets pki export-trust build
     @echo "→ starting the stack"
-    @just _dc up -d surrealdb rabbitmq axiam-server device-twin
+    @# No service list: every service that is not behind the `tools` profile
+    @# starts here. Phase 1 adds caddy, axiam-frontend and postgres to this one
+    @# file (D-06 — one compose file, no per-host override), and an explicit
+    @# list is exactly how a service silently stops being part of `just up`.
+    @just _dc up -d
     @just _wait-axiam
 
 down:

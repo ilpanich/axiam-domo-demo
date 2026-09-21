@@ -1,0 +1,166 @@
+# AXIAM Domo Demo — the single browser-facing origin (PLAT-06, D-30, D-31).
+#
+# Every byte a browser sees in this demo arrives through this file. There are
+# two site blocks and they are two HOSTS, not two ports:
+#
+#   https://{$DOMO_HOST}        the portals + AXIAM's API, unprefixed
+#   https://axiam.{$DOMO_HOST}  the AXIAM admin console (D-03)
+#
+# Why two hosts rather than two paths or two ports: AXIAM's session cookies
+# (`axiam_access`, `axiam_refresh`, `axiam_csrf`) are HOST-scoped. Ports do not
+# isolate cookies. Sharing one host between the console and the portals means a
+# super-admin signed into the console and a resident signed into their app
+# silently overwrite each other's session in the same browser (T-03-02).
+#
+# # No Caddy-minted certificates, ever
+#
+# `auto_https off` plus a static `tls <cert> <key>` per site block. Caddy's
+# internal-CA directive mints from Caddy's OWN local CA, and ACME needs a public
+# CA plus an internet-reachable challenge — this demo has exactly one trust
+# anchor (the offline organization root AXIAM imports by BYOK) and no internet
+# exposure. Either one would be a second CA, which the project forbids outright.
+# `just edge-verify` asserts that directive's literal text appears zero times in
+# this file, which is also why it is not spelled out anywhere above.
+#
+# # Route ORDER is the load-bearing part (D-30)
+#
+# `/api/mgmt/*` and `/api/twin/*` are matched BEFORE AXIAM's `/api/v1/*`. Get
+# this wrong and Phase 2's and Phase 3's own API calls are proxied into AXIAM,
+# which answers a bare 404 — a failure that looks like an AXIAM bug and is not.
+# The `route` block below makes that order literal rather than incidental:
+# inside `route`, handlers run in the order written, not in Caddy's default
+# directive order.
+#
+# # Upstream TLS
+#
+# Both internal hops name a trust pool file AND a server name. This mirrors the
+# analog at ../axiam/docker/nginx.conf.template lines 118-123
+# (`proxy_ssl_verify on`, `proxy_ssl_verify_depth 3`, `proxy_ssl_name`,
+# `proxy_ssl_protocols TLSv1.3`). There is deliberately no verification-skip
+# anywhere in this stack: a name mismatch is fixed by correcting the SAN row in
+# deploy/pki/listeners.conf, never by relaxing the check.
+{
+	auto_https off
+}
+
+# -----------------------------------------------------------------------------
+# The portal origin.
+# -----------------------------------------------------------------------------
+{$DOMO_HOST}:443 {
+	tls /etc/caddy/tls/server.pem /etc/caddy/tls/server.key {
+		# D-07: TLS 1.3 only, on every listener this project configures.
+		protocols tls1.3 tls1.3
+	}
+
+	route {
+		# 1. Management Platform (Phase 2). The route exists now so its clients
+		#    can be written and tested against it; it answers 503 rather than
+		#    404 so a caller can tell "not built yet" from "wrong path".
+		handle /api/mgmt/* {
+			header Content-Type "text/plain; charset=utf-8"
+			respond "The Management Platform arrives in Phase 2. This route is reserved and matched ahead of AXIAM's /api/v1 on purpose (D-30); it will proxy to management-platform once Phase 2 lands." 503
+		}
+
+		# 2. Device Twin. `handle_path` strips the `/api/twin` prefix: the Twin
+		#    serves `/healthz` and `/rmq/*` at its own root
+		#    (services/device-twin/src/rmq.rs), so `/api/twin/healthz` must
+		#    reach it as `/healthz`. The AXIAM routes below are the opposite
+		#    case and deliberately use `handle`.
+		handle_path /api/twin/* {
+			reverse_proxy https://device-twin:8443 {
+				header_up -X-Client-Certificate
+				transport http {
+					tls_trust_pool file /etc/caddy/tls/root.pem
+					tls_server_name device-twin
+				}
+			}
+		}
+
+		# 3. AXIAM, UNPREFIXED. This supersedes PLAT-06's `/axiam` wording
+		#    (D-30): the AXIAM SDKs and the WASM SDK build their URLs as
+		#    `<origin>/api/v1/...` and `<origin>/oauth2/...` with no room for a
+		#    prefix, so `handle` (which does not strip) is required here.
+		#
+		#    `/oauth2/*` carries its trailing slash on purpose. The nginx analog
+		#    documents this exact hazard at lines 128-135: a bare `/oauth2`
+		#    prefix also swallowed `/oauth2-clients`, an SPA route, and proxied
+		#    it to a backend with no such endpoint. Every real OAuth2 endpoint
+		#    lives under `/oauth2/`, so narrowing loses nothing.
+		@axiam path /api/v1 /api/v1/* /oauth2/* /.well-known/*
+		handle @axiam {
+			reverse_proxy https://axiam-server:8090 {
+				# T-03-01: a client cannot forge a device identity through the
+				# edge. This edge terminates server-auth TLS only, so any
+				# inbound X-Client-Certificate is unverified by construction.
+				# AXIAM also refuses it unless
+				# AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT is on, which it is
+				# not — neither defence has to be the only one.
+				header_up -X-Client-Certificate
+				transport http {
+					tls_trust_pool file /etc/caddy/tls/root.pem
+					tls_server_name axiam-server
+				}
+			}
+		}
+
+		# 4. Everything else: the static front door (D-31).
+		handle {
+			header {
+				# Taken verbatim from ../axiam/docker/nginx.conf.template:69.
+				# `wasm-unsafe-eval` is not optional decoration: Phase 5 signs
+				# in through the WASM OPAQUE SDK, and Chrome refuses
+				# WebAssembly.instantiate outright when script-src is set
+				# without it — silently, from the page's point of view. Keeping
+				# the policy identical here means Phase 5 never has to loosen
+				# it later.
+				Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"
+				Referrer-Policy "strict-origin-when-cross-origin"
+				X-Content-Type-Options "nosniff"
+				X-Frame-Options "DENY"
+				-Server
+			}
+			root * /srv/landing
+			# Renders `{{ readFile "fingerprint.txt" }}` in index.html from the
+			# file `just export-trust` writes. Evaluated per request, so
+			# `just pki-rotate-root` changes the page with no rebuild and no
+			# code edit — a hardcoded fingerprint would silently go stale and
+			# a stale fingerprint is a trust failure, not a cosmetic one.
+			templates
+			file_server
+		}
+	}
+}
+
+# -----------------------------------------------------------------------------
+# The AXIAM admin console, on its own host and therefore its own cookie jar.
+# -----------------------------------------------------------------------------
+axiam.{$DOMO_HOST}:443 {
+	tls /etc/caddy/tls/server.pem /etc/caddy/tls/server.key {
+		protocols tls1.3 tls1.3
+	}
+
+	route {
+		# The console image's own nginx would proxy these itself. Splitting them
+		# here instead keeps every request exactly ONE hop from the edge, which
+		# is what AXIAM__RATE_LIMIT__TRUSTED_HOPS=1 assumes; letting the console
+		# proxy them would make those requests two hops and skew rate limiting
+		# to the wrong client address.
+		@api path /api /api/* /oauth2/* /.well-known/*
+		handle @api {
+			reverse_proxy https://axiam-server:8090 {
+				header_up -X-Client-Certificate
+				transport http {
+					tls_trust_pool file /etc/caddy/tls/root.pem
+					tls_server_name axiam-server
+				}
+			}
+		}
+
+		# The SPA itself. Plain HTTP on the compose network: this hop never
+		# leaves the Docker bridge and the console image serves no TLS
+		# listener. It also carries its own security headers (same CSP).
+		handle {
+			reverse_proxy axiam-frontend:8080
+		}
+	}
+}
