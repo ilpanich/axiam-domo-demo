@@ -276,3 +276,73 @@ edge-reload:
     @echo "→ reloading caddy"
     @just _dc exec -T caddy caddy reload --config /etc/caddy/Caddyfile --force
     @echo "  ✓ configuration and certificates reloaded, no restart"
+
+# --- the database ------------------------------------------------------------
+
+# Assert PostgreSQL came up with TLS on, at the pinned major version, and
+# unreachable from anywhere but the compose network.
+#
+# All three are things that fail QUIETLY. `ssl = on` in the configuration file
+# does not mean TLS came up: PostgreSQL logs a permissions complaint about the
+# key and carries on serving plaintext, which no client notices until someone
+# looks. The version matters because PostgreSQL 18 reintroduces the Flyway
+# incompatibility Phase 2 depends on avoiding. And a published port is a change
+# nobody sees until it is a finding.
+pg-verify:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    fail=0
+    ok()  { printf '  ✓ %s\n' "$1"; }
+    bad() { printf '  ✗ %s\n' "$1"; fail=1; }
+    set -a; if [ -f .env ]; then . ./.env; fi; set +a
+    user="${POSTGRES_USER:-domo}"
+
+    echo "→ postgres"
+    if [ -z "$(just _dc ps -q postgres 2>/dev/null)" ]; then
+        echo "  → skipped (postgres is not running for this compose project — 'just up' first)"
+        exit 0
+    fi
+
+    # The statement goes in on STDIN, never as a -c argument. `just _dc`
+    # interpolates its ARGS parameter into a shell unquoted (and `just` expands
+    # its own braces even inside a comment, which is why they are not written
+    # here), so `-tAc "SHOW ssl;"` arrives
+    # as two words and psql reads `ssl;` as a database name — it fails with
+    # `database "ssl" does not exist`, which reads exactly like a real problem.
+    ask() { printf '%s\n' "$1" | just _dc exec -T postgres psql -U "$user" -tA 2>/dev/null | tr -d '[:space:]'; }
+
+    v=$(ask "SHOW ssl;")
+    [ "$v" = "on" ] \
+        && ok "SHOW ssl → on" \
+        || bad "SHOW ssl → '${v:-<no answer>}'; TLS did not come up. The usual cause is the key file's ownership or mode (P-6) — check 'just logs postgres' for a permissions complaint."
+
+    v=$(ask "SHOW server_version;")
+    case "$v" in
+      17|17.*) ok "server_version → $v" ;;
+      *)       bad "server_version → '${v:-<no answer>}', expected 17.x. PostgreSQL 18 reintroduces the Spring Boot 4 Flyway incompatibility Phase 2 avoids." ;;
+    esac
+
+    v=$(ask "SHOW ssl_min_protocol_version;")
+    [ "$v" = "TLSv1.3" ] \
+        && ok "ssl_min_protocol_version → TLSv1.3 (D-07)" \
+        || bad "ssl_min_protocol_version → '${v:-<no answer>}', expected TLSv1.3"
+
+    # `docker compose port` prints `invalid IP:0` — on stdout, exit 0 — for an
+    # UNPUBLISHED port, so a bare `grep -q .` on its output reports every
+    # unpublished service as published. Match a real address instead.
+    pub=$(just _dc port postgres 5432 2>/dev/null \
+            | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$|^\[[0-9a-fA-F:]+\]:[0-9]+$' || true)
+    if [ -n "$pub" ]; then
+        bad "port 5432 is PUBLISHED on $pub — D-05 allows only 443, 8090 and 8883 out of the Docker network"
+    else
+        ok "5432 is not published; postgres is reachable only on the compose network"
+    fi
+
+    # Phase 1 owns no schema. A migration file appearing here would mean a
+    # service's schema was created by something other than that service.
+    n=$(find . -path ./target -prune -o \( -name 'V[0-9]*__*.sql' -o -path '*/migrations/*.sql' \) -print 2>/dev/null | wc -l)
+    [ "$n" -eq 0 ] \
+        && ok "no migration or schema file in the repository — each service owns its own, from Phase 2 on" \
+        || bad "$n migration file(s) present; Phase 1 creates the database and the TLS posture and nothing else"
+
+    if [ "$fail" -eq 0 ]; then echo "✓ pg-verify"; else echo "✗ pg-verify"; exit 1; fi

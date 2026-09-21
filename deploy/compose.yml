@@ -352,6 +352,54 @@ services:
     networks: [domo-network]
 
   # ---------------------------------------------------------------------------
+  # PostgreSQL — the Management Platform's and the Device Twin's database.
+  #
+  # ONE instance, TWO schemas, and each service owns and migrates only its own:
+  # Phase 2's Management Platform through Flyway, Phase 3's Twin through
+  # `sqlx migrate`. Phase 1 deliberately creates the database and the TLS
+  # posture and NOTHING else — no table, no migration, no ORM schema. A schema
+  # created here would have no owner and no migration history, and the first
+  # service to run its own migrations would have to reconcile with it.
+  #
+  # Unpublished, and it stays that way in every phase (D-05, T-03-07): only 443,
+  # 8090 and 8883 leave the Docker network. `docker compose port postgres 5432`
+  # printing nothing is an assertion in `just pg-verify`, not an accident.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    # The whole server configuration lives in the mounted file. The official
+    # image's entrypoint still runs initdb, still writes pg_hba.conf into
+    # PGDATA, and still appends its host rule there — the config file names
+    # those paths explicitly so none of that is lost.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.tls.conf"]
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-domo}"
+      POSTGRES_DB: "${POSTGRES_DB:-domo}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?generated - run 'just up', which mints it into .secrets/generated.env}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-tls:/etc/postgresql/tls:ro
+      - ./postgres/postgresql.tls.conf:/etc/postgresql/postgresql.tls.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          # shared_buffers 160MB + 40 x work_mem 4MB worst case + backends and
+          # the OS page cache the planner is told about. 512MB leaves headroom
+          # on the Pi's 4 GB budget without letting a runaway query take the
+          # whole machine down with it.
+          memory: 512M
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
   # Caddy — the single browser-facing origin (PLAT-06, D-30).
   #
   # The ONLY service that publishes 443. Everything a browser touches arrives
@@ -518,6 +566,10 @@ services:
 volumes:
   surrealdb-data:
   rabbitmq-data:
+  # Its own named volume, distinct from AXIAM's SurrealDB store: `just
+  # demo-reset` wipes both, and a shared volume would make "reset the demo
+  # data" and "reset AXIAM" the same irreversible action.
+  postgres-data:
   axiam-tls:
   rabbitmq-tls:
   twin-tls:
