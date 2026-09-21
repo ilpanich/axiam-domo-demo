@@ -36,34 +36,23 @@ logs *ARGS:
 
 # --- preflight ---------------------------------------------------------------
 
+# D-35's checks, as a standalone script so the same code runs from `just up`,
+# from a bare shell, and on the Pi.
+#
+# The script is located from the JUSTFILE's directory rather than from the
+# working directory: a recipe must be able to find its own script no matter
+# where `just` was pointed.
+#
+# Two facts only `just` knows are handed in:
+#   DOMO_STACK_RUNNING  our own containers hold the published ports, which is
+#                       the normal state of a second run and not a conflict
+#                       (plan 01-01 learned this the hard way).
+#   DOMO_NEED_CARGO     a local build is about to happen, so cargo matters.
+#                       Unset on the demo machine — the Pi never needs it.
 preflight:
-    @echo "→ preflight"
-    @for t in docker openssl just cargo; do \
-        command -v "$t" >/dev/null 2>&1 || { echo "✗ preflight: '$t' is not on PATH"; exit 1; }; \
-    done
-    @docker compose version >/dev/null 2>&1 || { echo "✗ preflight: the docker compose v2 plugin is missing"; exit 1; }
-    @docker info >/dev/null 2>&1 || { echo "✗ preflight: the Docker daemon is not reachable"; exit 1; }
-    @for mp in /home /; do \
-        [ -d "$mp" ] || continue; \
-        avail="$(df -BG --output=avail "$mp" | tail -1 | tr -dc '0-9')"; \
-        [ -z "$avail" ] && continue; \
-        if [ "$avail" -lt "{{min_free_gb}}" ]; then \
-            echo "✗ preflight: only ${avail}G free on ${mp}, need {{min_free_gb}}G"; exit 1; \
-        fi; \
-    done
-    @# Ports are only a conflict when somebody ELSE holds them. Our own stack
-    @# holding 8090/8883 is the normal state of a second `just tracer` run, and
-    @# failing on it would make the tracer non-repeatable.
-    @if [ -z "$(just _dc ps -q 2>/dev/null)" ]; then \
-        for p in 8090 8883; do \
-            if ss -ltn 2>/dev/null | grep -qE "[:.]$p[[:space:]]"; then \
-                echo "✗ preflight: port $p is already in use by another process"; exit 1; \
-            fi; \
-        done; \
-    else \
-        echo "  … stack already running, skipping the port check"; \
-    fi
-    @echo "  ✓ preflight"
+    @set -a; if [ -f .env ]; then . ./.env; fi; set +a; \
+    if [ -n "$(just _dc ps -q 2>/dev/null)" ]; then export DOMO_STACK_RUNNING=1; fi; \
+    bash "{{justfile_directory()}}/scripts/preflight.sh"
 
 # --- secrets -----------------------------------------------------------------
 
@@ -132,20 +121,6 @@ build:
     @echo "→ building images"
     @just _dc build device-twin domo-bootstrap
 
-# `export-trust` (just/pki.just) is a dependency, not a convenience: the `caddy`
-# service bind-mounts dist/trust/domo-root.sha256 as the landing page's
-# fingerprint source, and Docker silently creates a DIRECTORY at a bind-mount
-# target whose source does not exist. Exporting first is what keeps that from
-# becoming a 500 on `/` that looks like a template bug.
-up: preflight secrets pki export-trust build
-    @echo "→ starting the stack"
-    @# No service list: every service that is not behind the `tools` profile
-    @# starts here. Phase 1 adds caddy, axiam-frontend and postgres to this one
-    @# file (D-06 — one compose file, no per-host override), and an explicit
-    @# list is exactly how a service silently stops being part of `just up`.
-    @just _dc up -d
-    @just _wait-axiam
-
 down:
     @just _dc down
 
@@ -162,6 +137,33 @@ _wait-axiam:
     done; \
     echo "✗ AXIAM did not become ready in 120s"; \
     just _dc logs --no-color --tail 40 axiam-server; \
+    exit 1
+
+# Poll the edge, which is the last thing to become true on a cold start: Caddy
+# resolves its upstreams per request, so it answers long before the Twin behind
+# it does. Asking the Twin's health endpoint THROUGH Caddy proves both hops at
+# once, which is the property `platform-up` claims.
+#
+# The host name is pinned to the LAN address when it does not resolve here,
+# exactly as `just edge-verify` does: publishing an mDNS name is the operator's
+# job (and is printed by preflight), not a reason for `just up` to fail.
+_wait-edge:
+    @echo "→ waiting for the edge"
+    @set -a; if [ -f .env ]; then . ./.env; fi; set +a; \
+    host="${DOMO_HOST:-domo.local}"; pin=""; \
+    if ! getent hosts "$host" >/dev/null 2>&1; then \
+        pin="--resolve $host:443:${DOMO_LAN_IP:-127.0.0.1}"; \
+    fi; \
+    for i in $(seq 1 45); do \
+        if curl -sf $pin --cacert dist/trust/domo-root.pem \
+                "https://$host/api/twin/healthz" >/dev/null 2>&1; then \
+            echo "  ✓ the Device Twin answers through Caddy"; exit 0; \
+        fi; \
+        sleep 2; \
+    done; \
+    echo "✗ the edge did not answer in 90s"; \
+    just _dc logs --no-color --tail 20 caddy; \
+    just _dc logs --no-color --tail 20 device-twin; \
     exit 1
 
 # Scrape the single-use setup token from the FULL log history.
@@ -182,11 +184,377 @@ _setup-token:
         echo "  ✓ setup token captured"; \
     fi
 
+# `DOMO_FAIL_AT` has a container boundary to cross, and crossing it is this
+# recipe's job rather than the operator's. `domo-bootstrap` is a one-shot
+# invoked through `docker compose run --rm`, so a value set in the operator's
+# shell reaches `just` and stops there unless this invocation carries it
+# further. Naming a bootstrap-owned stage such as `catalog` would otherwise do
+# nothing at all, and the resume assertion would fail with no hint why.
+#
+# Passed on the command line rather than declared in `deploy/compose.yml`: a
+# compose-level declaration would have to take a defaulted form to avoid
+# looking like an operator-set key to the `.env.example` drift gate, and the
+# command line keeps a testing aid out of the production topology entirely.
 _stage +ARGS:
-    @just _dc run --rm --quiet-pull domo-bootstrap {{ARGS}}
+    @if [ -n "${DOMO_FAIL_AT:-}" ]; then \
+        just _dc run --rm --quiet-pull -e DOMO_FAIL_AT="$DOMO_FAIL_AT" domo-bootstrap {{ARGS}}; \
+    else \
+        just _dc run --rm --quiet-pull domo-bootstrap {{ARGS}}; \
+    fi
 
 _probe +ARGS:
     @just _dc run --rm --quiet-pull domo-probe {{ARGS}}
+
+# --- the staged, resumable checklist (D-34) ----------------------------------
+
+# One command from a clean machine to a running stack (PLAT-01).
+#
+# # The ten stages, and who runs each
+#
+# D-34 names the sequence: preflight, pki, axiam-up, org-bootstrap, tenants,
+# catalog, service-certs, broker, platform-up, verify. The split follows D-35:
+# `just` owns everything that needs the Docker daemon or the host filesystem —
+# compose lifecycle, volume removal, scraping the setup token from the FULL log
+# history, tailing a failing container's log — and `domo-bootstrap` owns the
+# AXIAM API work from inside the compose network. That split is what lets the
+# Raspberry Pi bootstrap the demo with no cargo toolchain installed, while the
+# bootstrap still reaches `axiam-server` and `rabbitmq` by the very names their
+# certificates carry as SANs.
+#
+# `tenants` is three subcommands under one name (tenants, the BYOK root import
+# and its signing CAs, and each tenant's admin). They are inseparable: a signing
+# CA cannot exist before its tenant, and no tenant-scoped call can be made
+# without that tenant's own admin (D-37). `tools/domo-bootstrap/src/state.rs`
+# holds the same sequence on the container side.
+#
+# # A marker is a skip hint, never the truth
+#
+# A stage is skipped only when `.secrets/state/<stage>` exists AND a re-probe
+# says the work is genuinely there. A run that died just after writing its
+# marker leaves a marker with nothing behind it, and believing it would skip
+# that stage forever — which is the failure this project has already seen once
+# in the form of a zero-length `.done` file.
+#
+# # `resuming at: <stage>`
+#
+# Printed before the first stage that is actually RUN when earlier ones were
+# skipped. Without it, a run that correctly skipped nine stages and a run that
+# silently redid them look identical from the outside.
+up:
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    # --- the sequence --------------------------------------------------------
+    # Mirrors state.rs's Stage::ALL. `preflight` and `verify` are deliberately
+    # NOT resumable: they are checks, so "already done" is never an answer —
+    # and if they were, a converged run would report itself as resuming.
+    STAGES=(preflight pki axiam-up org-bootstrap tenants catalog service-certs broker platform-up verify)
+    RESUMABLE=" pki axiam-up org-bootstrap tenants catalog service-certs broker platform-up "
+
+    STATE_DIR=.secrets/state
+    resumed=""
+    skipped=0
+
+    headline() {
+      case "$1" in
+        preflight)     echo "disk, tools, host and ports" ;;
+        pki)           echo "the offline organization root and every SAN leaf" ;;
+        axiam-up)      echo "SurrealDB, AXIAM and the broker" ;;
+        org-bootstrap) echo "the organization and its super-admin" ;;
+        tenants)       echo "tenants, the BYOK root import, signing CAs and tenant admins" ;;
+        catalog)       echo "the role and permission catalog, applied and converged" ;;
+        service-certs) echo "service accounts, their certificates and the portfolio roots" ;;
+        broker)        echo "the 'domo' MQTT vhost" ;;
+        platform-up)   echo "the Twin, PostgreSQL, Caddy and the AXIAM console" ;;
+        verify)        echo "the invariants, and the demo card" ;;
+      esac
+    }
+
+    # Which container's log explains a failure here. Naming the wrong one sends
+    # the reader to a quiet log and teaches them the hint is useless.
+    log_container() {
+      case "$1" in
+        axiam-up|org-bootstrap|tenants|catalog|service-certs) echo axiam-server ;;
+        broker)                                               echo rabbitmq ;;
+        platform-up|verify)                                   echo caddy ;;
+        *)                                                    echo "" ;;
+      esac
+    }
+
+    # An empty cause means the stage already printed its own `✗` line — the
+    # AXIAM-facing stages render themselves, inside the container. Printing a
+    # second one here would make every remote failure look like two.
+    die() {
+      local stage="$1" cause="$2" c
+      [ -n "$cause" ] && printf '✗ %s  %s\n' "$stage" "$cause"
+      c="$(log_container "$stage")"
+      if [ -n "$c" ] && [ -n "$(just _dc ps -q "$c" 2>/dev/null)" ]; then
+        printf '  the last lines of the %s log:\n' "$c"
+        just _dc logs --no-color --tail 40 "$c" 2>&1 | sed 's/^/    /'
+      fi
+      printf "  re-run 'just up' to resume at: %s\n" "$stage"
+      exit 1
+    }
+
+    mark() {
+      mkdir -p "$STATE_DIR"
+      umask 077
+      printf '{\n  "stage": "%s",\n  "completed_at": "%s",\n  "produced": "%s"\n}\n' \
+        "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" > "$STATE_DIR/$1"
+      chmod 600 "$STATE_DIR/$1"
+    }
+
+    produced_of() {
+      sed -n 's/.*"produced": "\(.*\)".*/\1/p' "$STATE_DIR/$1" 2>/dev/null | head -1
+    }
+
+    # The re-probe. Host stages are answered here; AXIAM-facing stages are
+    # answered by `domo-bootstrap stage-probe`, which issues GETs and a login
+    # and creates nothing.
+    probe() {
+      case "$1" in
+        pki)
+          [ -s .secrets/pki/root.pem ] || return 1
+          [ -s dist/trust/domo-root.sha256 ] || return 1
+          local n
+          while IFS='|' read -r n _; do
+            case "${n# }" in ''|\#*) continue ;; esac
+            n="$(echo "$n" | tr -d '[:space:]')"
+            [ -n "$n" ] || continue
+            [ -s ".secrets/pki/${n}.pem" ] || return 1
+          done < deploy/pki/listeners.conf
+          return 0 ;;
+        axiam-up)
+          curl -sf --cacert .secrets/pki/root.pem https://127.0.0.1:8090/health >/dev/null 2>&1 ;;
+        platform-up)
+          # Caddy accepting its own configuration is the honest question, not
+          # "is a container running": a container in a restart loop is running
+          # for most of the time you look at it. The one-shot init services are
+          # excluded from the count because they correctly exit.
+          local want have
+          want="$(just _dc config --services 2>/dev/null | grep -vcE '^(domo-bootstrap|domo-probe|surrealdb-init|tls-init)$')"
+          have="$(just _dc ps -q --status running 2>/dev/null | grep -c .)"
+          [ "$have" -ge "$want" ] || return 1
+          just _dc exec -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 ;;
+        *)
+          just _stage stage-probe "$1" >/dev/null 2>&1 ;;
+      esac
+    }
+
+    # --- the stages ----------------------------------------------------------
+
+    do_preflight() { just preflight; }
+
+    do_pki() {
+      # Stale-volume refusal, copied from the sibling AXIAM justfile: minting a
+      # fresh credential set against data volumes that still hold the OLD
+      # credentials produces a broker and a database that refuse every login,
+      # with nothing in the message about why.
+      if [ ! -f "{{env_file}}" ] && [ -n "$(just _volumes-present)" ]; then
+        echo "  ✗ {{env_file}} is missing while this project's data volumes still exist."
+        echo "    Those volumes hold the credentials the old file minted, and RabbitMQ and"
+        echo "    PostgreSQL apply credentials only on the FIRST boot of an empty volume."
+        echo "    Run 'just demo-reset' to wipe them, or restore the file."
+        return 1
+      fi
+      just secrets || return 1
+      just pki || return 1
+      just export-trust >/dev/null || return 1
+    }
+
+    do_axiam_up() {
+      # The images this repository builds are built here rather than before the
+      # sequence, so preflight has already refused if it was going to. `just
+      # build` is a no-op when the layers are cached; `_images-fresh` is what
+      # stops a stale image from silently running a previous plan's binary.
+      just _images-fresh || return 1
+      # An explicit list ONLY here: the Twin needs the tenant map the `tenants`
+      # stage writes, and Caddy needs certificates that do not exist yet.
+      # `platform-up` below starts everything with NO list, so a service added
+      # by a later phase can never silently drop out of `just up` (D-06).
+      just _dc up -d surrealdb-init tls-init surrealdb axiam-server rabbitmq || return 1
+      just _wait-axiam || return 1
+    }
+
+    do_org_bootstrap() {
+      just _setup-token || return 1
+      just _stage stage-run org-bootstrap
+    }
+
+    do_platform_up() {
+      # No service list, deliberately (plan 01-03): every service that is not
+      # behind the `tools` profile starts here.
+      just _dc up -d || return 1
+      just _wait-edge
+    }
+
+    do_verify() {
+      just _stage authz-verify
+    }
+
+    # --- the run -------------------------------------------------------------
+
+    for stage in "${STAGES[@]}"; do
+      # The interruption hook, host side. Fires at the stage's ENTRY: before any
+      # work and before its marker, so an interrupted run leaves exactly what a
+      # real failure at this point would leave.
+      #
+      # ONLY for the stages this runner owns. A bootstrap-owned stage is gated
+      # inside the container by `state::gate`, reached through the `-e
+      # DOMO_FAIL_AT` that `_stage` forwards — short-circuiting it here would
+      # make that forwarding untested, and an untested boundary crossing is
+      # exactly the thing that silently stops working.
+      case " preflight pki axiam-up platform-up verify " in
+        *" $stage "*)
+          if [ "${DOMO_FAIL_AT:-}" = "$stage" ]; then
+            die "$stage" "DOMO_FAIL_AT=$stage — aborted at this stage's entry, before any work and before its marker"
+          fi ;;
+      esac
+
+      if [[ "$RESUMABLE" == *" $stage "* ]] && [ -e "$STATE_DIR/$stage" ] && probe "$stage"; then
+        printf '✓ %s  already done — %s\n' "$stage" "$(produced_of "$stage")"
+        skipped=$(( skipped + 1 ))
+        continue
+      fi
+
+      if [ -z "$resumed" ] && [ "$skipped" -gt 0 ] && [[ "$RESUMABLE" == *" $stage "* ]]; then
+        printf 'resuming at: %s\n' "$stage"
+        resumed=1
+      fi
+
+      case "$stage" in
+        preflight)     printf '→ %s  %s\n' "$stage" "$(headline "$stage")"; do_preflight || die "$stage" "a preflight check refused; nothing was started or changed" ;;
+        pki)           printf '→ %s  %s\n' "$stage" "$(headline "$stage")"; do_pki       || die "$stage" "the offline PKI could not be issued" ;;
+        axiam-up)      printf '→ %s  %s\n' "$stage" "$(headline "$stage")"; do_axiam_up  || die "$stage" "the AXIAM half of the stack did not come up" ;;
+        org-bootstrap) do_org_bootstrap || die "$stage" "the organization could not be bootstrapped. 'reset required' in the output above means the one-time setup token is gone and only 'just demo-reset' can recover this volume" ;;
+        platform-up)   printf '→ %s  %s\n' "$stage" "$(headline "$stage")"; do_platform_up || die "$stage" "a platform service did not come up" ;;
+        verify)        printf '→ %s  %s\n' "$stage" "$(headline "$stage")"; do_verify   || die "$stage" "an invariant is broken; the lines above name which" ;;
+        *)             just _stage stage-run "$stage" || die "$stage" "" ;;
+      esac
+
+      # The AXIAM-facing stages write their own marker inside the container,
+      # with what they actually produced. The host stages are marked here.
+      case "$stage" in
+        preflight)   mark "$stage" "disk, tools and ports checked" ;;
+        pki)         mark "$stage" "root $(cut -d= -f2 dist/trust/domo-root.sha256 2>/dev/null | tr -d ' ')" ;;
+        axiam-up)    mark "$stage" "axiam-server answering on :8090" ;;
+        platform-up) mark "$stage" "every non-tools service running" ;;
+        verify)      mark "$stage" "invariants asserted, demo card written" ;;
+      esac
+
+      case "$stage" in
+        preflight|pki|axiam-up|platform-up|verify)
+          printf '✓ %s  %s\n' "$stage" "$(produced_of "$stage")" ;;
+      esac
+    done
+
+    just _disk-guard
+    echo "✓ up"
+
+# The ten D-34 stages and what this machine has done, read from the markers.
+checklist:
+    @just _stage checklist
+
+# --- reset (D-09, D-10) -------------------------------------------------------
+
+# Wipe this project's state and rebuild it, keeping the organization root.
+#
+# # Why volumes, and not the API
+#
+# Tearing down through AXIAM would have to satisfy `tenants.delete`'s 409
+# precondition (an `export_audit` within the last 6 hours) and would leave
+# whatever it could not delete. Removing the volumes is the path that stays
+# idempotent and survives interruption (D-09).
+#
+# # Named, one by one. Never pruned.
+#
+# Docker's blanket volume-pruning subcommand would also destroy the SIBLING
+# AXIAM checkout's development volumes, which are not ours to touch. The list
+# comes from the compose file itself, so a volume a later phase adds is removed
+# too — and each removal still names exactly one volume.
+#
+# That command's exact two-word name is deliberately not written anywhere in
+# `just/`, `scripts/` or `tools/`: the prohibition is asserted by a raw grep, so
+# a comment mentioning it verbatim would fail the check it exists to support.
+# Plan 01-03 hit the identical trap with `tls internal` in the Caddyfile.
+#
+# # The root survives (D-10)
+#
+# Every marker is cleared EXCEPT `pki-root.done`, `gen-pki.sh`'s root guard.
+# Rotating the root invalidates the trust every browser, every LAN client and
+# the simulator PC has already installed; that is `just pki-rotate-root`, it
+# asks for confirmation, and it appears in no automated path.
+demo-reset:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "→ demo-reset"
+
+    if [ ! -f "{{env_file}}" ] && [ -n "$(just _volumes-present)" ]; then
+      echo "  ✗ {{env_file}} is missing while this project's data volumes still exist."
+      echo "    Minting a fresh credential set against old data gives a broker and a"
+      echo "    database that refuse every login. Remove the volumes deliberately, or"
+      echo "    restore the file, then run this again."
+      exit 1
+    fi
+
+    just _dc down --remove-orphans || true
+
+    removed=0
+    for v in $(just _volumes-present); do
+      docker volume rm "$v" >/dev/null && echo "  ✓ removed volume $v" && removed=$(( removed + 1 ))
+    done
+    [ "$removed" -eq 0 ] && echo "  … no volume of this project was present"
+
+    # Markers: everything except the root guard.
+    if [ -d .secrets/state ]; then
+      find .secrets/state -maxdepth 1 -type f ! -name pki-root.done -delete
+      echo "  ✓ stage markers cleared (pki-root.done kept — the root is never rotated by a reset)"
+    fi
+
+    # Material issued BENEATH the root by a CA that no longer exists. The root
+    # itself and its offline-signed server leaves stay: they are re-issued from
+    # the same key, so every machine that trusts the root still trusts them.
+    rm -rf .secrets/probe .secrets/smoke .secrets/axiam/service
+    rm -f .secrets/axiam/*-ca.pem
+    echo "  ✓ tenant CAs and issued client material cleared; the organization root kept"
+
+    just up
+
+# Every volume of THIS compose project that currently exists, one per line.
+#
+# Derived from the compose file rather than hardcoded, so a volume a later phase
+# declares is covered without editing the reset path — the way a reset silently
+# stops being a reset.
+_volumes-present:
+    @set -a; if [ -f .env ]; then . ./.env; fi; set +a; \
+    p="${COMPOSE_PROJECT_NAME:-domo}"; \
+    for v in $(just _dc config --volumes 2>/dev/null); do \
+        docker volume inspect "${p}_${v}" >/dev/null 2>&1 && echo "${p}_${v}"; \
+    done; true
+
+# Build the two images this repository owns, but only when they are stale.
+#
+# This exists because of a real hour lost: a 33-hour-old `domo-tools:dev` ran a
+# binary from before the subcommand being invoked existed, and clap's
+# "unrecognized subcommand" reads exactly like a source bug. No recipe depended
+# on `just build`, so nothing ever noticed.
+#
+# Freshness is image creation time versus the newest mtime under the paths that
+# go into the image. Cheap, and it names the reason when it rebuilds.
+_images-fresh:
+    @newest=$(find Cargo.toml Cargo.lock crates tools services deploy/docker/Dockerfile.rust \
+                -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1); \
+    stale=0; \
+    for i in domo-twin domo-tools; do \
+        built=$(docker image inspect "${i}:${DOMO_IMAGE_TAG:-dev}" 2>/dev/null \
+                | sed -n 's/.*"Created": "\([^"]*\)".*/\1/p' | head -1); \
+        if [ -z "$built" ]; then echo "  … ${i} image is absent"; stale=1; continue; fi; \
+        b=$(date -d "$built" +%s 2>/dev/null || echo 0); \
+        if [ "$b" -lt "${newest:-0}" ]; then \
+            echo "  … ${i} image is older than the source it was built from"; stale=1; \
+        fi; \
+    done; \
+    if [ "$stale" -eq 1 ]; then just build; else echo "  ✓ images match the source"; fi
 
 # --- the tracer --------------------------------------------------------------
 
