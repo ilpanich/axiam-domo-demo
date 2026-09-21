@@ -205,6 +205,184 @@ _stage +ARGS:
 _probe +ARGS:
     @just _dc run --rm --quiet-pull domo-probe {{ARGS}}
 
+# --- multi-architecture images (PLAT-02) --------------------------------------
+
+# Build both of this repository's images for both reference architectures.
+#
+# The demo runs on an amd64 laptop and on an arm64 Raspberry Pi 5 from ONE
+# compose file (D-06). Every third-party image in the stack already publishes
+# both; these two are the ones we owe.
+#
+# # What this produces
+#
+#   domo-{twin,tools}:dev          the native image the local stack runs
+#   domo-{twin,tools}:dev-arm64    the Pi's image, in the local daemon so
+#                                  `just images-verify` can assert it
+#   dist/images/domo-*-arm64.tar   the same image as a transferable archive:
+#                                  `docker load` on the Pi, then tag it `:dev`
+#
+# A single-tag multi-architecture MANIFEST LIST is deliberately not produced.
+# It would need a registry to live in, and this demo is LAN-only with no
+# registry (D-05) — a manifest list cannot be loaded into a daemon at all. The
+# per-architecture tag plus the archive is the form that actually reaches the
+# second machine.
+#
+# # Disk
+#
+# This machine has run out of space mid-session, and the resulting failures read
+# as linker or compiler bugs. Free space is printed before the build and
+# asserted after it, and the lock below keeps two heavy builds from ever running
+# at once — which is the rule the 25 GB figure exists to enforce.
+images:
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    lock=dist/.images.lock
+    mkdir -p dist
+    if ! mkdir "$lock" 2>/dev/null; then
+      echo "✗ images: another image build is already running (${lock} exists)."
+      echo "  Two heavy builds must not run in parallel below 25G free, and this"
+      echo "  machine has run out of disk mid-session before. Wait for it, or remove"
+      echo "  the lock directory if you are sure nothing else is building."
+      exit 1
+    fi
+    trap 'rmdir "$lock" 2>/dev/null' EXIT
+
+    free_gb() { df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+
+    echo "→ disk before the build"
+    for mp in /home /; do printf '  … %s  %sG free\n' "$mp" "$(free_gb "$mp")"; done
+    for mp in /home /; do
+      a="$(free_gb "$mp")"
+      if [ -n "$a" ] && [ "$a" -lt "{{min_free_gb}}" ]; then
+        echo "✗ images: only ${a}G free on ${mp}, need {{min_free_gb}}G. Reclaim space first."
+        exit 1
+      fi
+    done
+
+    mkdir -p dist/images
+    tag="${DOMO_IMAGE_TAG:-dev}"
+
+    for pair in "twin:domo-twin" "tools:domo-tools"; do
+      target="${pair%%:*}"; image="${pair##*:}"
+      for plat in linux/amd64 linux/arm64; do
+        case "$plat" in
+          linux/amd64) t="${image}:${tag}" ;;
+          linux/arm64) t="${image}:${tag}-arm64" ;;
+        esac
+        printf '→ %s  %s\n' "$t" "$plat"
+        docker buildx build --platform "$plat" --target "$target" -t "$t" --load \
+          -f deploy/docker/Dockerfile.rust . >/dev/null 2>&1 \
+          || { echo "✗ images: ${t} failed to build for ${plat}."; \
+               echo "  A linker error naming the target triple means the builder image lacks a C"; \
+               echo "  toolchain for that architecture — see the header of deploy/docker/Dockerfile.rust,"; \
+               echo "  and the native-on-the-Pi fallback it documents."; exit 1; }
+        printf '  ✓ %s\n' "$t"
+      done
+      docker save "${image}:${tag}-arm64" -o "dist/images/${image}-arm64.tar" \
+        || { echo "✗ images: could not archive ${image}:${tag}-arm64"; exit 1; }
+      printf '  ✓ dist/images/%s-arm64.tar  (docker load on the Pi)\n' "$image"
+      # This build's own leftovers: the untagged intermediate images the rebuild
+      # just orphaned. Dangling only — never a volume, never a tagged image.
+      docker image prune -f >/dev/null 2>&1
+    done
+
+    echo "→ disk after the build"
+    fail=0
+    for mp in /home /; do
+      a="$(free_gb "$mp")"
+      printf '  … %s  %sG free\n' "$mp" "$a"
+      if [ -n "$a" ] && [ "$a" -lt "{{min_free_gb}}" ]; then fail=1; fi
+    done
+    if [ "$fail" -eq 1 ]; then
+      echo "  … under {{min_free_gb}}G free — dropping the BuildKit cache"
+      docker builder prune -f >/dev/null 2>&1
+      for mp in /home /; do
+        a="$(free_gb "$mp")"
+        if [ -n "$a" ] && [ "$a" -lt "{{min_free_gb}}" ]; then
+          echo "✗ images: still only ${a}G free on ${mp} after cleaning. Reclaim space."
+          exit 1
+        fi
+      done
+    fi
+    echo "✓ images"
+
+# Assert that every image the compose file references can run on the Pi.
+#
+# Asked of the MANIFEST, not of the documentation: a third-party image is
+# queried in its registry, and each of ours is checked twice — the image config
+# says `arm64`, AND the ELF header of the binary inside it says `aarch64`.
+#
+# The second check is not belt and braces. The first cut of the cross-build
+# produced an image whose config said `arm64` around an x86-64 binary, because a
+# `TARGETPLATFORM` default shadowed BuildKit's value. Only the ELF header caught
+# it, and it would otherwise have failed on the Pi and nowhere else (T-07-07).
+images-verify:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    fail=0
+    ok()  { printf '  ✓ %s\n' "$1"; }
+    bad() { printf '  ✗ %s\n' "$1"; fail=1; }
+    tag="${DOMO_IMAGE_TAG:-dev}"
+
+    echo "→ images the compose file references"
+
+    # e_machine, bytes 18-19 of the ELF header: 3e 00 is x86-64, b7 00 is aarch64.
+    # Read rather than shelled out to `file`, which is not installed everywhere.
+    elf_machine() {
+      case "$(od -An -tx1 -j18 -N2 "$1" | tr -d ' ')" in
+        3e00) echo x86-64 ;;
+        b700) echo aarch64 ;;
+        *)    echo unknown ;;
+      esac
+    }
+
+    ours() {
+      local image="$1" bin="$2" ref="${1}:${tag}-arm64" arch probe tmp
+      arch="$(docker image inspect "$ref" 2>/dev/null | sed -n 's/.*"Architecture": "\([^"]*\)".*/\1/p' | head -1)"
+      if [ -z "$arch" ]; then
+        bad "${ref} does not exist — run 'just images'"
+        return
+      fi
+      [ "$arch" = "arm64" ] \
+        && ok "${ref}  image config: arm64" \
+        || bad "${ref}  image config says '${arch}', expected arm64"
+      probe="domo-imgverify-$$"
+      tmp="$(mktemp -d)"
+      if docker create --name "$probe" "$ref" >/dev/null 2>&1 \
+         && docker cp "${probe}:/usr/local/bin/${bin}" "${tmp}/bin" >/dev/null 2>&1; then
+        m="$(elf_machine "${tmp}/bin")"
+        [ "$m" = "aarch64" ] \
+          && ok "${ref}  ${bin} is a real aarch64 ELF" \
+          || bad "${ref}  ${bin} is a ${m} ELF, not aarch64 — this image would fail on the Pi and nowhere else"
+      else
+        bad "${ref}  could not extract ${bin} to check its ELF header"
+      fi
+      docker rm -f "$probe" >/dev/null 2>&1
+      rm -rf "$tmp"
+    }
+
+    # Everything not built here: asked of the registry, because a locally pulled
+    # copy is single-architecture by construction and says nothing about the Pi.
+    for ref in $(just _dc config --images 2>/dev/null | sort -u); do
+      case "$ref" in
+        domo-twin:*|domo-tools:*) continue ;;
+      esac
+      out="$(docker buildx imagetools inspect "$ref" 2>&1)"
+      if printf '%s' "$out" | grep -q 'linux/arm64'; then
+        ok "${ref}  manifest lists linux/arm64"
+      elif printf '%s' "$out" | grep -qiE 'connection|timeout|no such host|denied|unauthorized'; then
+        bad "${ref}  the registry could not be reached, so its manifest was not checked. This recipe runs on the BUILD machine, which needs network; it is not part of 'just up'."
+      else
+        bad "${ref}  manifest lists only: $(printf '%s' "$out" | grep -o 'linux/[a-z0-9]*' | sort -u | tr '\n' ' ')"
+      fi
+    done
+
+    ours domo-twin domo-twin
+    ours domo-tools domo-bootstrap
+
+    if [ "$fail" -eq 0 ]; then echo "✓ images-verify"; else echo "✗ images-verify"; exit 1; fi
+
 # --- the staged, resumable checklist (D-34) ----------------------------------
 
 # One command from a clean machine to a running stack (PLAT-01).

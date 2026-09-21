@@ -1,22 +1,98 @@
 # Rust images for the Domo demo: the Device Twin and the bootstrap/probe tools.
 #
-# Native platform only. The arm64 cross-build (a `--platform=$BUILDPLATFORM`
-# builder stage cross-compiling to aarch64, rather than a QEMU-emulated rustc)
-# is plan 01-07's work.
+# Both images build for both of the demo's reference architectures — amd64 (the
+# XPS) and arm64 (the Raspberry Pi 5) — from this one file, because PLAT-02 asks
+# for the SAME single command on both machines and D-06 allows exactly one
+# topology.
+#
+# # Cross-compile, do not emulate
+#
+# The builder stage is pinned to `$BUILDPLATFORM`: it always runs natively, and
+# `cargo` cross-compiles to `$TARGETPLATFORM`'s triple. The runtime stage is
+# pinned to `$TARGETPLATFORM` and only ever does a `COPY`, so nothing foreign is
+# ever executed. The alternative — letting BuildKit run the whole build under
+# QEMU for the foreign platform — means `rustc` itself runs emulated, which is
+# the one genuinely slow path in this stack.
+#
+# This is the shape AXIAM's own `docker/Dockerfile.server` uses for its wasm
+# stage (`FROM --platform=$BUILDPLATFORM … AS wasm`), so the pattern has a
+# working precedent in this codebase family. AXIAM's SERVER stage, by contrast,
+# builds natively per architecture — cross-compiling the whole workspace has no
+# precedent here and was treated as new work (RESEARCH A8, Pattern 8).
+#
+# # Why a C cross-toolchain is installed, and why the cross route can fail
+#
+# Two build scripts in this dependency tree compile native C: `aws-lc-sys`
+# (rustls' default crypto provider, via CMake) and `ring`. Cross-compiling them
+# needs a C compiler, an archiver and a linker FOR THE TARGET, not just for the
+# build host — and cmake-rs and cc-rs find them only through the
+# `CC_<triple>` / `CXX_<triple>` / `AR_<triple>` and
+# `CARGO_TARGET_<TRIPLE>_LINKER` variables set below. A linker error naming
+# `aarch64-unknown-linux-gnu` is this toolchain being absent or misnamed, and it
+# is the concrete way this route fails.
+#
+# If it ever cannot be made to work, the documented fallback is to build
+# natively ON the Pi: this same file, run there, has `$BUILDPLATFORM` ==
+# `$TARGETPLATFORM` and compiles natively with no cross toolchain involved. The
+# requirement is that the Pi runs the stack, not that a particular build
+# strategy works. `docs/setup.md` documents both routes.
+#
+# # Key material
 #
 # The build context is the repository root and `.dockerignore` excludes
 # `.secrets/`, `**/*.pem` and `**/*.key`, so no key material can reach a layer
-# here (T-01-03). The acceptance gate proves it by streaming both produced
-# images through `docker save` and counting PEM private-key headers.
+# here (T-01-03). `just guard-secrets` proves it by streaming both produced
+# images through `docker save` and counting complete PEM private-key BLOCKS —
+# not header occurrences, which can never reach zero for any image containing
+# OpenSSL (plan 01-01's finding, plan 01-02's implementation).
 
-FROM rust:1.98-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS builder
 
-# `aws-lc-sys` (rustls' default crypto provider) compiles C and needs cmake and
-# a C compiler. Without these the build fails deep inside a build script with a
-# message that does not name the missing tool.
+# Populated by BuildKit. Declared WITHOUT defaults on purpose: a default here
+# WINS over the value BuildKit supplies, and the first cut of this file — which
+# defaulted both to `linux/amd64` — produced an image whose config said `arm64`
+# while the binary inside it was x86-64. That is precisely threat T-07-07: an
+# image that is wrong for the second machine and looks right on the first.
+# Unset (a builder with no platform information at all) means "build natively",
+# handled below.
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+
+# `aws-lc-sys` compiles C and needs cmake and a C compiler. Without these the
+# build fails deep inside a build script with a message that does not name the
+# missing tool.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake clang \
     && rm -rf /var/lib/apt/lists/*
+
+# The target triple, its Rust std, and the GNU cross toolchain when the target
+# is not the build host. Installed per target rather than unconditionally: on a
+# native build (including every build on the Pi itself) this adds nothing.
+RUN set -eux; \
+    host="$(rustc -vV | sed -n 's/^host: //p')"; \
+    case "${TARGETPLATFORM:-}" in \
+      "")          triple="$host" ;; \
+      linux/amd64) triple=x86_64-unknown-linux-gnu ;; \
+      linux/arm64) triple=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported TARGETPLATFORM: $TARGETPLATFORM" >&2; exit 1 ;; \
+    esac; \
+    echo "building for $triple (build host $host, TARGETPLATFORM=${TARGETPLATFORM:-<none>})"; \
+    echo "$triple" > /triple; \
+    rustup target add "$triple"; \
+    if [ "$triple" != "$host" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# cc-rs, cmake-rs and cargo each look for a differently-spelled variable. All
+# three are set, for the cross target only; on a native build they name tools
+# that are simply never consulted.
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+    AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 
 WORKDIR /src
 
@@ -33,13 +109,31 @@ COPY services services
 
 # `--locked` is the supply-chain half of T-01-08: the lockfile decides, and a
 # drifted dependency fails the build instead of silently entering an image.
-RUN cargo build --release --locked --workspace
+#
+# `--target` is given even for the native build, so both architectures put their
+# binaries at the same predictable path and the runtime stages below stay
+# identical. (Passing `--target` also opts out of cargo's shared-artifact
+# shortcut, which is what keeps a host build script from being linked into a
+# cross-compiled binary.)
+RUN set -eux; \
+    triple="$(cat /triple)"; \
+    cargo build --release --locked --workspace --target "$triple"; \
+    mkdir -p /out; \
+    cp "target/${triple}/release/domo-twin" \
+       "target/${triple}/release/domo-bootstrap" \
+       "target/${triple}/release/domo-probe" /out/
 
 # -----------------------------------------------------------------------------
 # Device Twin
+#
+# Distroless, non-root, numeric user, ownership preserved through the COPY —
+# the runtime shape AXIAM's own server image uses. This stage is NOT pinned:
+# a stage with no `--platform` already defaults to `$TARGETPLATFORM`, so it
+# resolves the ARM base when the target is the Pi. The binary copied into it was
+# cross-compiled a stage earlier and is never executed here.
 # -----------------------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12:nonroot AS twin
-COPY --from=builder --chown=65532:65532 /src/target/release/domo-twin /usr/local/bin/domo-twin
+COPY --from=builder --chown=65532:65532 /out/domo-twin /usr/local/bin/domo-twin
 USER 65532:65532
 EXPOSE 8443
 ENTRYPOINT ["/usr/local/bin/domo-twin"]
@@ -51,7 +145,7 @@ ENTRYPOINT ["/usr/local/bin/domo-twin"]
 # because distroless has no shell to dispatch with.
 # -----------------------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12:nonroot AS tools
-COPY --from=builder --chown=65532:65532 /src/target/release/domo-bootstrap /usr/local/bin/domo-bootstrap
-COPY --from=builder --chown=65532:65532 /src/target/release/domo-probe /usr/local/bin/domo-probe
+COPY --from=builder --chown=65532:65532 /out/domo-bootstrap /usr/local/bin/domo-bootstrap
+COPY --from=builder --chown=65532:65532 /out/domo-probe /usr/local/bin/domo-probe
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/domo-bootstrap"]
