@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# Pre-commit guard (PKI-06, D-13).
+#
+# Installed by `just hooks-install`, which points core.hooksPath at .githooks.
+# Git never does that automatically, so a fresh clone is unguarded until that
+# recipe is run — `just verify` calls the same logic standalone, so CI and the
+# phase gate do not depend on anyone having remembered.
+#
+# All the logic lives in scripts/guard-secrets.sh so that the hook and
+# `just guard-secrets` can never drift apart and start disagreeing about what
+# is safe to commit.
+
+set -euo pipefail
+
+exec "$(git rev-parse --show-toplevel)/scripts/guard-secrets.sh"
