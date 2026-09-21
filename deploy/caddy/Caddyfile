@@ -119,6 +119,18 @@
 				X-Frame-Options "DENY"
 				-Server
 			}
+			# docs/trust.md is mounted into the site root, so the operator
+			# reading the front door on the PRESENTING machine can follow the
+			# import instructions without a checkout of this repository. Served
+			# as text/plain so both Chrome and Firefox render it inline:
+			# text/markdown makes Chrome download it instead, which turns "read
+			# the instructions" into "find the file you just downloaded".
+			#
+			# This is documentation, not key material — D-14 forbids serving the
+			# root CERTIFICATE, and nothing here does.
+			@trustdoc path /trust.md
+			header @trustdoc Content-Type "text/plain; charset=utf-8"
+
 			root * /srv/landing
 			# Renders `{{ readFile "fingerprint.txt" }}` in index.html from the
 			# file `just export-trust` writes. Evaluated per request, so
@@ -128,6 +140,28 @@
 			templates
 			file_server
 		}
+	}
+
+	# An unmatched path under this host is a MISSING PAGE, not a proxy error, and
+	# it must be visibly answered by the front door. `/oauth2-clients` is the
+	# concrete case D-30 cares about: it must fall through to here rather than
+	# being swallowed by the `/oauth2/*` matcher, and "reached the landing
+	# handler" is only checkable if the answer looks like the landing page.
+	#
+	# The status stays 404 — rewriting a typo into a 200 would be lying — but the
+	# body, the content type and the security headers are the front door's.
+	handle_errors {
+		header {
+			Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+			-Server
+		}
+		root * /srv/landing
+		rewrite * /index.html
+		templates
+		file_server
 	}
 }
 

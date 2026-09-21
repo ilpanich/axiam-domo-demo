@@ -1,0 +1,102 @@
+<!doctype html>
+<!--
+  The demo's front door (D-31).
+
+  Entirely static: no build step, no framework, no network call, no inline
+  script. In Phase 1 its job is narrow and load-bearing — if this page loads in
+  Chrome and Firefox with no certificate warning, then the offline root, the SAN
+  list, the tls-init key handoff and the Caddy TLS configuration are all correct
+  together. Nothing else in the phase proves that as a single fact.
+
+  The two template expressions below are evaluated by Caddy's `templates`
+  directive on every request, not at build time:
+
+    env "DOMO_HOST"             the console's host, so this file carries no
+                                hardcoded host name
+    readFile "fingerprint.txt"  dist/trust/domo-root.sha256, mounted into the
+                                site root by deploy/compose.yml
+
+  Do not write template braces inside this comment. Caddy evaluates the whole
+  file, comments included: an empty pair renders the page as HTTP 500 with
+  "missing value for command", and a real one would execute here too.
+
+  The fingerprint is READ, never transcribed. `just pki-rotate-root` changes the
+  root; a hardcoded value would keep displaying the old one, and an operator
+  comparing a stale fingerprint against a new certificate has been taught to
+  ignore the one check that makes importing a CA safe.
+
+  The certificate ITSELF is not here and is not downloadable (D-14). The
+  fingerprint is public and comparing it is the point; handing out the root over
+  HTTP is how people end up trusting one they never checked.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AXIAM Domo Demo</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+
+  <header>
+    <h1>AXIAM Domo Demo</h1>
+    <p class="lede">
+      Multi-tenant IoT home automation where every action — by a person or by a
+      device — is authenticated and authorized by <strong>AXIAM</strong>.
+    </p>
+  </header>
+
+  <section aria-labelledby="portals">
+    <h2 id="portals">Portals</h2>
+    <ul class="tiles">
+      <li class="tile pending">
+        <span class="tile-name">Staff console</span>
+        <span class="tile-note">Property managers, installers and concierges</span>
+        <span class="badge">Arriving in Phase 5</span>
+      </li>
+      <li class="tile pending">
+        <span class="tile-name">Resident app</span>
+        <span class="tile-note">Apartment devices, and granting an installer access</span>
+        <span class="badge">Arriving in Phase 5</span>
+      </li>
+      <li class="tile pending">
+        <span class="tile-name">Sim control</span>
+        <span class="tile-note">The simulated intercoms, lights and thermostats</span>
+        <span class="badge">Arriving in Phase 5</span>
+      </li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="console">
+    <h2 id="console">AXIAM console</h2>
+    <p>
+      Tenants, resources, groups and memberships, live, in AXIAM's own admin UI.
+      It runs on its own host so its session never collides with a portal
+      session in the same browser.
+    </p>
+    <p><a class="cta" href="https://axiam.{{env "DOMO_HOST"}}/">https://axiam.{{env "DOMO_HOST"}}/</a></p>
+  </section>
+
+  <section aria-labelledby="trust">
+    <h2 id="trust">Trust anchor</h2>
+    <p>
+      Every certificate in this demo — this page's included — is issued by one
+      offline organization root. Compare this fingerprint against the one your
+      browser reports, and against the one <code>just export-trust</code> prints,
+      before you trust anything. All three must agree.
+    </p>
+    <pre class="fingerprint"><code>{{readFile "fingerprint.txt"}}</code></pre>
+    <p>
+      <a href="/trust.md">How to import it, confirm it, and remove it again</a>
+      — per machine and per browser.
+    </p>
+    <p class="fine">
+      The certificate is deliberately not offered for download here. Get it from
+      <code>dist/trust/domo-root.pem</code> on the machine running the demo.
+    </p>
+  </section>
+
+</main>
+</body>
+</html>

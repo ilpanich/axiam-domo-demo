@@ -381,13 +381,32 @@ services:
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-tls:/etc/caddy/tls:ro
-      - ./landing:/srv/landing:ro
+      # The site root is assembled FILE BY FILE rather than by mounting
+      # ./landing as a directory. Two reasons, one practical and one security:
+      #
+      #   Practical: the fingerprint and the trust document live outside
+      #   ./landing (they are generated and shared artifacts), and runc cannot
+      #   create a mountpoint inside a read-only bind mount — nesting them under
+      #   a `./landing:...:ro` mount fails at container start with
+      #   "make mountpoint: read-only file system".
+      #
+      #   Security: this is an exhaustive list of what the front door can serve.
+      #   A directory mount would serve whatever later lands in it; T-03-06 says
+      #   the root certificate must never be downloadable, and the strongest
+      #   form of that is "no route can reach a file nobody listed here".
+      #
+      # Phase 5's portals are separate routes and separate mounts; they do not
+      # go in this directory.
+      - ./landing/index.html:/srv/landing/index.html:ro
+      - ./landing/style.css:/srv/landing/style.css:ro
       # The root's SHA-256 fingerprint, written by `just export-trust` and
-      # rendered into the landing page by Caddy's `templates` at request time
-      # (D-31, D-14). The fingerprint is public and comparing it is the whole
-      # point; the CERTIFICATE is deliberately not mounted and not served, so
-      # no route can ever reach it.
+      # rendered into the page by Caddy's `templates` at request time (D-31,
+      # D-14). The fingerprint is public and comparing it is the whole point;
+      # the CERTIFICATE is deliberately absent from this container entirely.
       - ../dist/trust/domo-root.sha256:/srv/landing/fingerprint.txt:ro
+      # The import instructions the landing page links to, so an operator on the
+      # presenting machine can follow them without a checkout of this repository.
+      - ../docs/trust.md:/srv/landing/trust.md:ro
     restart: unless-stopped
     networks: [domo-network]
 
@@ -406,6 +425,17 @@ services:
     depends_on:
       tls-init:
         condition: service_completed_successfully
+      # NOT ordering pedantry — this image cannot start without it. nginx
+      # resolves every `proxy_pass` upstream at CONFIG LOAD, so with no
+      # `axiam-server` container in existence it exits immediately with
+      # `[emerg] host not found in upstream "axiam-server"`. Observed, not
+      # assumed: a stack brought up without axiam-server put this service into a
+      # restart loop that reads like a broken image. `service_started` rather
+      # than `service_healthy` because axiam-server's own healthcheck is
+      # disabled here (P-4) — the container merely has to EXIST for Docker's
+      # embedded DNS to answer.
+      axiam-server:
+        condition: service_started
     environment:
       AXIAM_BACKEND_ORIGIN: "https://axiam-server:8090"
       AXIAM_BACKEND_SNI: "axiam-server"

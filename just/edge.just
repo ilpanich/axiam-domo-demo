@@ -133,12 +133,40 @@ edge-verify:
             && ok "caddy validate accepts the running configuration" \
             || bad "caddy validate rejected /etc/caddy/Caddyfile"
 
-        if ! getent hosts "$host" >/dev/null 2>&1; then
-            echo "  → skipped: $host does not resolve on this machine."
-            echo "    Publish it (avahi-publish -a -R $host <LAN_IP>, and the same for axiam.$host)"
-            echo "    or add both names to /etc/hosts. Confirm with: getent hosts $host axiam.$host"
+        # DOMO_HOST is an mDNS/hosts-file name the OPERATOR publishes, and on a
+        # machine where they have not yet, a plain `getent`-gated skip means the
+        # route map is never asserted at all — on the default machine. So when
+        # the name does not resolve, pin it to DOMO_LAN_IP for the duration of
+        # these checks instead of giving up.
+        #
+        # This is not a weaker test. `--resolve` changes only which address the
+        # socket goes to: the request still carries the real Host header and the
+        # real SNI, so every matcher, every site block and the whole certificate
+        # chain are exercised exactly as a browser would exercise them. What it
+        # cannot tell you is whether a LAN CLIENT can find the name — which is
+        # a different question, belongs to the operator, and is what the printed
+        # note below is for.
+        addr="${DOMO_LAN_IP:-}"
+        pin=""
+        if getent hosts "$host" >/dev/null 2>&1; then
+            ok "$host resolves on this machine"
+            addr=""
+        elif [ -z "$addr" ]; then
+            echo "  → skipped: $host does not resolve and DOMO_LAN_IP is unset, so there is"
+            echo "    no address to pin it to. Set DOMO_LAN_IP in .env, or publish the name."
+            addr="__skip__"
         else
-            c="curl -sS --cacert {{trust_bundle}} -o /dev/null -w %{http_code}"
+            pin="--resolve $host:443:$addr --resolve axiam.$host:443:$addr"
+            echo "  … $host does not resolve here; pinning it to $addr for these checks."
+            echo "    A LAN CLIENT still needs the name published:"
+            echo "      avahi-publish -a -R $host $addr   (and the same for axiam.$host)"
+            echo "    or both names in /etc/hosts. Confirm with: getent hosts $host axiam.$host"
+        fi
+
+        if [ "$addr" = "__skip__" ]; then
+            : # nothing to check against
+        else
+            c="curl -sS $pin --cacert {{trust_bundle}} -o /dev/null -w %{http_code}"
 
             code=$($c "https://$host/api/twin/healthz" 2>/dev/null)
             case "$code" in
@@ -147,53 +175,80 @@ edge-verify:
               *)   bad "/api/twin/healthz returned $code — the Twin upstream is unreachable or failed verification" ;;
             esac
 
-            code=$($c "https://$host/.well-known/openid-configuration" 2>/dev/null)
-            [ "$code" = "200" ] \
-                && ok "/.well-known/openid-configuration → 200 from AXIAM, unprefixed" \
-                || bad "/.well-known/openid-configuration returned $code — AXIAM is not reachable unprefixed (PLAT-06)"
-
-            code=$($c "https://$host/oauth2/jwks" 2>/dev/null)
-            [ "$code" = "200" ] \
-                && ok "/oauth2/jwks → 200 from AXIAM" \
-                || bad "/oauth2/jwks returned $code from the AXIAM matcher"
+            # Both of these name what the status MEANS. "502" on its own sends
+            # the reader hunting through the Caddyfile for a routing bug that is
+            # not there; the request reached the right upstream and the upstream
+            # was not listening.
+            for p in /.well-known/openid-configuration /oauth2/jwks; do
+                code=$($c "https://$host$p" 2>/dev/null)
+                case "$code" in
+                  200) ok "$p → 200 from AXIAM, unprefixed (PLAT-06)" ;;
+                  502|503|504)
+                       bad "$p returned $code: the AXIAM matcher DID route it to axiam-server, but that upstream is down or its certificate failed verification against the root" ;;
+                  200*|404)
+                       bad "$p returned $code from something other than AXIAM — check the matcher, this path must not fall through" ;;
+                  *)   bad "$p returned $code, expected 200 from AXIAM" ;;
+                esac
+            done
 
             code=$($c "https://$host/api/mgmt/anything" 2>/dev/null)
             [ "$code" = "503" ] \
                 && ok "/api/mgmt/* → 503, the route is reserved ahead of AXIAM" \
                 || bad "/api/mgmt/anything returned $code, expected the reserved 503"
 
-            ct=$(curl -sS --cacert {{trust_bundle}} -D- -o /dev/null "https://$host/oauth2-clients" 2>/dev/null | tr -d '\r')
+            h="curl -sS $pin --cacert {{trust_bundle}} -D- -o /dev/null"
+
+            ct=$($h "https://$host/oauth2-clients" 2>/dev/null | tr -d '\r')
             if printf '%s' "$ct" | grep -qi '^content-type: text/html'; then
                 ok "/oauth2-clients was served by the landing handler, NOT captured by /oauth2/*"
             else
                 bad "/oauth2-clients was captured by the /oauth2/* matcher (it did not reach the landing page)"
             fi
 
-            ct=$(curl -sS --cacert {{trust_bundle}} -D- -o /dev/null "https://$host/" 2>/dev/null | tr -d '\r')
+            ct=$($h "https://$host/" 2>/dev/null | tr -d '\r')
             printf '%s' "$ct" | grep -qi '^content-type: text/html' \
                 && ok "/ → text/html from the static front door" \
                 || bad "/ did not return HTML — the landing handler was shadowed by an earlier matcher"
+            printf '%s' "$ct" | grep -qi "^content-security-policy:.*wasm-unsafe-eval" \
+                && ok "/ carries the Content-Security-Policy including wasm-unsafe-eval (Phase 5's WASM SDK)" \
+                || bad "/ has no Content-Security-Policy with wasm-unsafe-eval — Phase 5's OPAQUE login would fail silently"
 
-            if getent hosts "axiam.$host" >/dev/null 2>&1; then
-                body=$(curl -sS --cacert {{trust_bundle}} "https://axiam.$host/" 2>/dev/null)
-                if printf '%s' "$body" | grep -qi '<div id="root"\|<script type="module"\|/assets/'; then
-                    ok "https://axiam.$host/ → the console SPA, on its own host and its own cookie jar"
-                else
-                    bad "https://axiam.$host/ did not return the console SPA"
-                fi
-                printf '%s' "$body" | grep -qi 'AXIAM Domo Demo' \
-                    && bad "https://axiam.$host/ returned the LANDING page — the two hosts are not separated" \
-                    || ok "the console host never returns the landing page"
-            else
-                echo "  → skipped: axiam.$host does not resolve (see the note above)"
+            # D-31 + D-14. Three copies of one value must agree; this asserts the
+            # two the machine can compare for itself. A drift here is a trust
+            # failure, not a cosmetic one: it teaches the operator to skip the
+            # comparison that makes importing a CA safe.
+            if [ -s dist/trust/domo-root.sha256 ]; then
+                fp=$(cut -d= -f2 dist/trust/domo-root.sha256)
+                curl -sS $pin --cacert {{trust_bundle}} "https://$host/" 2>/dev/null | grep -qF "$fp" \
+                    && ok "the fingerprint on the front door equals dist/trust/domo-root.sha256" \
+                    || bad "the fingerprint on the front door does NOT match dist/trust/domo-root.sha256"
             fi
 
+            # T-03-06: the root is shown as a fingerprint, never served.
+            served=0
+            for p in /domo-root.pem /root.pem /trust/domo-root.pem /dist/trust/domo-root.pem; do
+                code=$($c "https://$host$p" 2>/dev/null)
+                [ "$code" = "200" ] && { bad "the root certificate is downloadable at $p"; served=1; }
+            done
+            [ "$served" -eq 0 ] && ok "the root certificate is not downloadable from the front door"
+
+            body=$(curl -sS $pin --cacert {{trust_bundle}} "https://axiam.$host/" 2>/dev/null)
+            if printf '%s' "$body" | grep -qi 'id="root"\|<script type="module"\|/assets/'; then
+                ok "https://axiam.$host/ → the console SPA, on its own host and its own cookie jar"
+            else
+                bad "https://axiam.$host/ did not return the console SPA"
+            fi
+            printf '%s' "$body" | grep -q 'AXIAM Domo Demo' \
+                && bad "https://axiam.$host/ returned the LANDING page — the two hosts are not separated" \
+                || ok "the console host never returns the landing page"
+
             # D-07, both directions. A 1.3-only listener must ACCEPT 1.3 and
-            # REFUSE 1.2; asserting only the first would pass on a listener
-            # that quietly accepts everything.
-            if openssl s_client -connect "$host:443" -servername "$host" \
+            # REFUSE 1.2; asserting only the first would pass just as happily on
+            # a listener that quietly accepts everything.
+            conn="${addr:-$host}:443"
+            if openssl s_client -connect "$conn" -servername "$host" \
                    -CAfile {{trust_bundle}} -verify_return_error -tls1_3 </dev/null >/dev/null 2>&1; then
-                if openssl s_client -connect "$host:443" -servername "$host" -tls1_2 </dev/null >/dev/null 2>&1; then
+                if openssl s_client -connect "$conn" -servername "$host" -tls1_2 </dev/null >/dev/null 2>&1; then
                     bad "a TLS 1.2 handshake was ACCEPTED on :443 — D-07 requires 1.3 only"
                 else
                     ok "TLS 1.3 verifies against the exported root; TLS 1.2 is refused"
