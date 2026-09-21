@@ -40,3 +40,12 @@ smoke-tree:
 # fixture material with it. Touches nothing without the prefix.
 smoke-teardown:
     @just _stage smoke-teardown
+
+# --- the authorization model, live -------------------------------------------
+
+# Assert the tree's shape, its empty and duplicate behaviour, the group pattern
+# and that access genuinely follows group membership — against a real AXIAM.
+# Resolves the branch rather than rebuilding it, so a failing case can be
+# re-checked in seconds.
+smoke-authz:
+    @just _stage smoke-verify

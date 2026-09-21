@@ -25,6 +25,8 @@
 //! mechanism and it has to stand alone: `just demo-reset` is built in plan
 //! 01-07, which depends on this plan, so nothing here may call it.
 
+pub mod assertions;
+
 use anyhow::{Context, Result, bail};
 use axiam_sdk::management::models::{
     AddServiceAccountMemberRequest, CreateServiceAccountRequest, CreateUserRequest, Resource,
@@ -167,6 +169,59 @@ pub async fn build(client: &TenantClient) -> Result<Branch> {
         peer_device,
         apartment_slug,
     })
+}
+
+/// Resolve the branch without creating anything.
+///
+/// The read-only twin of [`build`], so `smoke-authz` and `smoke-certs` can run
+/// against the branch `smoke-tree` already made instead of rebuilding it. A
+/// missing node is an error naming the recipe that makes it, not a silent
+/// create — otherwise a run against an emptied tenant would quietly assert a
+/// branch it had just built itself.
+pub async fn resolve(client: &TenantClient) -> Result<Branch> {
+    let apartment_slug = naming::apartment_slug(BUILDING, UNIT)?;
+    let portfolio = resolve_portfolio(client).await?;
+
+    let site = expect(client, Kind::Site, SITE, portfolio).await?;
+    let site_common = expect(client, Kind::SiteCommon, COMMON, site).await?;
+    let building = expect(client, Kind::Building, BUILDING, site).await?;
+    let building_common = expect(client, Kind::BuildingCommon, COMMON, building).await?;
+    let apartment = expect(client, Kind::Apartment, &apartment_slug, building).await?;
+    let device = expect(client, Kind::Device, DEVICE, apartment).await?;
+    let peer_device = expect(client, Kind::Device, PEER_DEVICE, apartment).await?;
+
+    Ok(Branch {
+        portfolio,
+        site,
+        site_common,
+        building,
+        building_common,
+        apartment,
+        device,
+        peer_device,
+        apartment_slug,
+    })
+}
+
+/// The one child of `parent` with this kind and slug, or an error naming the
+/// recipe that would create it.
+async fn expect(client: &TenantClient, kind: Kind, slug: &str, parent: Uuid) -> Result<Uuid> {
+    let name = naming::resource_name(kind, slug)?;
+    let children = client
+        .resources()
+        .list_children(parent)
+        .await
+        .with_context(|| format!("listing children while resolving '{name}'"))?;
+    let matches: Vec<&Resource> = children.iter().filter(|r| r.name == name).collect();
+    match matches.as_slice() {
+        [one] => Ok(one.id),
+        [] => bail!("'{name}' does not exist — run `just smoke-tree` first"),
+        many => bail!(
+            "'{name}' exists {} times under the same parent; an authorization \
+             decision about it would be ambiguous (P-8)",
+            many.len()
+        ),
+    }
 }
 
 /// One node, with the structural groups its type calls for, asserted to belong

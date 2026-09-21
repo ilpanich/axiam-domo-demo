@@ -74,6 +74,9 @@ enum Stage {
     /// Build the one reserved-prefix branch of the tree, with its structural
     /// groups and the probe's device accounts (D-18).
     Smoke,
+    /// Assert the authorization model against live AXIAM over the smoke branch
+    /// (AUTHZ-01, AUTHZ-02).
+    SmokeVerify,
     /// Remove every reserved-prefix fixture, and nothing else.
     ///
     /// This plan's clean-state mechanism: `just demo-reset` arrives with plan
@@ -122,6 +125,7 @@ async fn main() -> Result<()> {
         Stage::Tree => stages::tree::run().await,
         Stage::AuthzVerify => stages::verify_all().await,
         Stage::Smoke => stages::smoke::run().await,
+        Stage::SmokeVerify => stages::smoke::assertions::run().await,
         Stage::SmokeTeardown => stages::smoke::teardown().await,
         Stage::Catalog { tenant, plan_only } => {
             stages::catalog::run(&tenant, plan_only).await
