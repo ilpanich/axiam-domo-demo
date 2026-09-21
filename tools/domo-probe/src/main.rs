@@ -15,6 +15,9 @@
 //! another screen" flow — and reaching for it here would be a category error.
 //! The C++ SDK has `authenticate_device()`; the Rust one does not.
 
+mod cases;
+mod matrix;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +26,13 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 use domo_common::topic::device_prefix;
+
+/// Where `domo-bootstrap`'s `smoke-certs` stage records the cross-tenant
+/// issuance answer. Mirrors `stages/smoke/certs.rs`'s `OUTCOME_PATH`; the two
+/// tools are separate crates, so the path is the only thing they can share.
+pub const CROSS_TENANT_OUTCOME: &str = "smoke/cross-tenant-issuance.json";
+/// The forged-common-name leaf, present only when AXIAM agreed to mint one.
+pub const FORGED_PEM: &str = "smoke/forged-cn.pem";
 
 const KEY_PATH: &str = "probe/device.key";
 const CSR_PATH: &str = "probe/device.csr";
@@ -44,6 +54,81 @@ enum Cmd {
     GenCsr,
     /// Device login over mTLS, then MQTT CONNECT, publish and subscribe.
     Connect,
+    /// Generate a keypair and CSR for every smoke fixture the bootstrap has
+    /// published an account id for.
+    ///
+    /// Each fixture's private key is generated here and stays here: only the
+    /// certificate signing request goes to `domo-bootstrap` (D-23, DEV-05).
+    SmokeKeys,
+    /// Run the positive and negative device connect matrix (D-25).
+    Matrix,
+    /// Wait out a real device-token expiry and assert the refusal end to end.
+    ///
+    /// Costs minutes by construction: AXIAM offers no per-request lifetime
+    /// override (P-13), so this is the only honest live form of the case.
+    MatrixExpired,
+}
+
+/// Generate one keypair and CSR per fixture, discovered from the account ids
+/// the `smoke` bootstrap stage published.
+///
+/// Idempotent per account, not per file: a fixture whose account was rebuilt
+/// gets a fresh key, because a certificate bound to the OLD key would be an
+/// mTLS identity whose halves disagree — and that failure surfaces far from
+/// here, as "building the device HTTP client".
+fn smoke_keys() -> Result<()> {
+    let dir = domo_common::secrets::path("smoke")
+        .context("resolving the smoke fixture directory")?;
+    if !dir.exists() {
+        bail!("no smoke fixtures on disk — run `just smoke-tree` first");
+    }
+
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "sa-id")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(stem.to_owned());
+        }
+    }
+    names.sort();
+    anyhow::ensure!(!names.is_empty(), "no fixture account ids found under {}", dir.display());
+
+    for name in &names {
+        let sa_id = domo_common::secrets::read_string(format!("smoke/{name}.sa-id"))?;
+        let key_path = format!("smoke/{name}.key");
+        let csr_path = format!("smoke/{name}.csr");
+        let for_path = format!("smoke/{name}.csr-for");
+
+        if domo_common::secrets::exists(&key_path)
+            && domo_common::secrets::exists(&csr_path)
+            && domo_common::secrets::read_string(&for_path).ok().as_deref() == Some(&sa_id)
+        {
+            println!("  ✓ {name}: keypair and CSR already exist for CN={sa_id}");
+            continue;
+        }
+
+        println!("  → {name}: generating an Ed25519 keypair (the key never leaves this host)");
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+            .with_context(|| format!("generating the keypair for '{name}'"))?;
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).context("building CSR params")?;
+        let mut dn = rcgen::DistinguishedName::new();
+        // The subject IS the identity: the broker derives `client_id` from
+        // this DN and the Twin requires `client_id == "CN=" + username`.
+        dn.push(rcgen::DnType::CommonName, sa_id.clone());
+        params.distinguished_name = dn;
+        let csr = params
+            .serialize_request(&key)
+            .context("serializing the CSR")?;
+
+        domo_common::secrets::write_string(&key_path, &key.serialize_pem())?;
+        domo_common::secrets::write_string(&csr_path, &csr.pem().context("encoding the CSR")?)?;
+        domo_common::secrets::write_string(&for_path, &sa_id)?;
+        println!("  ✓ {name}: CSR ready for CN={sa_id}");
+    }
+    Ok(())
 }
 
 /// `POST /api/v1/auth/device` response.
@@ -226,11 +311,9 @@ async fn connect() -> Result<()> {
                 published = true;
                 println!("  ✓ published to {topic}");
             }
-            Event::Incoming(Packet::Publish(p)) => {
-                if p.topic == topic {
-                    round_tripped = true;
-                    println!("  ✓ round trip observed on {}", p.topic);
-                }
+            Event::Incoming(Packet::Publish(p)) if p.topic == topic => {
+                round_tripped = true;
+                println!("  ✓ round trip observed on {}", p.topic);
             }
             _ => {}
         }
@@ -269,5 +352,8 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::GenCsr => gen_csr(),
         Cmd::Connect => connect().await,
+        Cmd::SmokeKeys => smoke_keys(),
+        Cmd::Matrix => matrix::run().await,
+        Cmd::MatrixExpired => matrix::run_expired().await,
     }
 }

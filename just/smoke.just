@@ -49,3 +49,34 @@ smoke-teardown:
 # re-checked in seconds.
 smoke-authz:
     @just _stage smoke-verify
+
+# --- the device identity chain, live -----------------------------------------
+
+# The probe generates a keypair and a certificate signing request per fixture —
+# every private key stays on the probe — and `domo-bootstrap` signs them under
+# each fixture's OWN tenant CA. The cross-tenant issuance attempt runs here
+# too, because only an admin client can make it.
+smoke-certs:
+    @just _probe smoke-keys
+    @just _stage smoke-certs
+
+# The positive and negative connect matrix: one line per case, exiting non-zero
+# if any observed outcome differs from its expectation.
+smoke-matrix: smoke-certs
+    @just _probe matrix
+
+# --- the whole suite ----------------------------------------------------------
+
+# Everything, composed from the parts above rather than duplicating them.
+# Green twice back to back with no cleanup in between, and green again after
+# `smoke-teardown` has emptied the tenant of prefixed fixtures.
+smoke: smoke-tree smoke-authz smoke-matrix
+    @echo "✓ smoke"
+
+# The matrix plus the one case the fast suite cannot cover: a genuinely expired
+# device token. AXIAM issues device tokens with a fixed lifetime and offers no
+# per-request override (P-13), so this waits the token out in real time. Expiry
+# is covered at unit level in plan 01-05; this is the end-to-end version, for
+# when someone wants it.
+smoke-slow: smoke
+    @just _probe matrix-expired

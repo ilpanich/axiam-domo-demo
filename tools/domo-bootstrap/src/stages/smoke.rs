@@ -26,6 +26,7 @@
 //! 01-07, which depends on this plan, so nothing here may call it.
 
 pub mod assertions;
+pub mod certs;
 
 use anyhow::{Context, Result, bail};
 use axiam_sdk::management::models::{
@@ -325,6 +326,10 @@ async fn ensure_account(client: &TenantClient, name: &str) -> Result<Uuid> {
     };
 
     domo_common::secrets::write_string(sa_id_path(name), &id.to_string())?;
+    // Which tenant issued this fixture. The probe needs it twice over: to find
+    // the signing CA that completes the chain, and to build the topic prefix,
+    // whose second level IS the tenant slug.
+    domo_common::secrets::write_string(format!("smoke/{name}.tenant"), &client.slug)?;
     Ok(id)
 }
 
@@ -431,6 +436,11 @@ pub async fn teardown() -> Result<()> {
     for slug in [TENANT, OTHER_TENANT] {
         let tenant_id = org.tenant_id(slug).await?;
         let client = TenantClient::login(&env, slug, tenant_id).await?;
+        if slug == TENANT {
+            // The forged-common-name leaf is unbound, so deleting the accounts
+            // below would leave it live. Revoked explicitly.
+            certs::revoke_recorded_forgery(&client).await?;
+        }
         teardown_tenant(&client).await?;
     }
 

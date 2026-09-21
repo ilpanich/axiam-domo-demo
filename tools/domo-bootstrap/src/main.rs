@@ -77,6 +77,9 @@ enum Stage {
     /// Assert the authorization model against live AXIAM over the smoke branch
     /// (AUTHZ-01, AUTHZ-02).
     SmokeVerify,
+    /// Sign every smoke fixture's certificate request, and attempt the
+    /// cross-tenant issuance the matrix records either way (PKI-03, DF-017).
+    SmokeCerts,
     /// Remove every reserved-prefix fixture, and nothing else.
     ///
     /// This plan's clean-state mechanism: `just demo-reset` arrives with plan
@@ -126,6 +129,7 @@ async fn main() -> Result<()> {
         Stage::AuthzVerify => stages::verify_all().await,
         Stage::Smoke => stages::smoke::run().await,
         Stage::SmokeVerify => stages::smoke::assertions::run().await,
+        Stage::SmokeCerts => stages::smoke::certs::run().await,
         Stage::SmokeTeardown => stages::smoke::teardown().await,
         Stage::Catalog { tenant, plan_only } => {
             stages::catalog::run(&tenant, plan_only).await
