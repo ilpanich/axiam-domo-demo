@@ -6,7 +6,9 @@
 # the demo machine needs no cargo toolchain. Every recipe here reuses
 # `_stage`, defined in `stack.just`.
 
-set shell := ["bash", "-euo", "pipefail", "-c"]
+# NOTE: `set shell` is deliberately absent. `just` refuses a setting that two
+# imported modules both define, and `just/stack.just` already sets it for the
+# whole import tree. Any module added later must leave it alone too.
 
 # --- the catalog -------------------------------------------------------------
 
