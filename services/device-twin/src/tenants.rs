@@ -29,8 +29,15 @@ pub struct TenantRegistry {
     http: reqwest::Client,
     axiam_url: url::Url,
     tenant_map_file: String,
-    /// tenant_id → slug, re-read from disk on a miss.
+    /// tenant_id → slug, re-read from disk when the file changes.
     slugs: RwLock<HashMap<String, String>>,
+    /// The modification time the `slugs` map was last read from.
+    ///
+    /// A miss re-reads only when this has moved. Without the gate, a stream of
+    /// connects naming random tenants would each cost a read and a parse —
+    /// unbounded work from an unauthenticated caller (T-05-08). With it, an
+    /// unknown tenant costs one `stat`.
+    slugs_read_at: RwLock<Option<std::time::SystemTime>>,
     /// tenant_id → verifier, built once per tenant.
     verifiers: RwLock<HashMap<String, Arc<JwksVerifier>>>,
 }
@@ -40,11 +47,13 @@ impl TenantRegistry {
     #[must_use]
     pub fn new(http: reqwest::Client, axiam_url: url::Url, tenant_map_file: String) -> Self {
         let slugs = load_tenant_map(&tenant_map_file);
+        let read_at = map_modified_at(&tenant_map_file);
         Self {
             http,
             axiam_url,
             tenant_map_file,
             slugs: RwLock::new(slugs),
+            slugs_read_at: RwLock::new(read_at),
             verifiers: RwLock::new(HashMap::new()),
         }
     }
@@ -79,7 +88,13 @@ impl TenantRegistry {
         self.verifiers.read().map(|v| v.len()).unwrap_or(0)
     }
 
-    /// Resolve a tenant slug, re-reading the map file on a miss.
+    /// Resolve a tenant slug, re-reading the map file when it has changed.
+    ///
+    /// Re-reading at all is what lets the bootstrap add a tenant while the Twin
+    /// is already listening — which it does on the very first run, since the
+    /// Twin starts before the tenants exist. Re-reading only when the file has
+    /// *moved* is what stops a stream of connects naming random tenants from
+    /// costing a read and a parse each (T-05-08).
     #[must_use]
     pub fn slug(&self, tenant_id: &str) -> Option<String> {
         if let Ok(map) = self.slugs.read()
@@ -87,10 +102,19 @@ impl TenantRegistry {
         {
             return Some(slug.clone());
         }
+        let on_disk = map_modified_at(&self.tenant_map_file);
+        if self.slugs_read_at.read().is_ok_and(|seen| *seen == on_disk) {
+            // Nothing has changed since the map we already hold. A miss now is
+            // a miss, and costs one `stat`.
+            return None;
+        }
         let fresh = load_tenant_map(&self.tenant_map_file);
         let slug = fresh.get(tenant_id).cloned();
         if let Ok(mut map) = self.slugs.write() {
             *map = fresh;
+        }
+        if let Ok(mut seen) = self.slugs_read_at.write() {
+            *seen = on_disk;
         }
         slug
     }
@@ -103,10 +127,21 @@ impl TenantRegistry {
 
     /// The verifier pinned to one tenant and to the m2m audience.
     ///
+    /// **A tenant this Twin does not serve resolves to no verifier at all.**
+    /// That refusal belongs here rather than at a call site: falling back to
+    /// another tenant's verifier — or building a fresh one for any well-formed
+    /// identifier — would make the tenant assertion meaningless, because a
+    /// token would succeed as soon as *some* verifier accepted it (T-05-02).
+    ///
     /// # Errors
     ///
-    /// When `tenant_id` is not a UUID, or the verifier cannot be built.
+    /// When the tenant is not one this Twin serves, when `tenant_id` is not a
+    /// UUID, or when the verifier cannot be built.
     pub fn verifier(&self, tenant_id: &str) -> Result<Arc<JwksVerifier>> {
+        anyhow::ensure!(
+            self.knows(tenant_id),
+            "tenant is not served by this Twin"
+        );
         if let Ok(v) = self.verifiers.read()
             && let Some(found) = v.get(tenant_id)
         {
@@ -180,6 +215,15 @@ pub fn peek_tenant_id(jwt: &str) -> Option<String> {
     v.get("tenant_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
+}
+
+/// When the tenant map was last written, or `None` if it is not there yet.
+///
+/// `None` is a legitimate state, not an error: the Twin starts before the
+/// bootstrap has published anything, and the transition from `None` to `Some`
+/// is exactly the change that should trigger a re-read.
+fn map_modified_at(path: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// tenant_id → slug, from the map the bootstrap publishes.
