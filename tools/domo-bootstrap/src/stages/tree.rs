@@ -158,14 +158,20 @@ async fn children_of(client: &TenantClient, parent: Option<Uuid>) -> Result<Vec<
 }
 
 /// Resolve or create `{role}@{type}:{slug}` and bind `role` to it, scoped to
-/// `resource_id`.
-async fn ensure_group_binding(
+/// `resource_id`. Returns the group's name.
+///
+/// Public because the *lazy* group path needs exactly this and must not
+/// reimplement it: plan 01-06's smoke branch creates a device's self-service
+/// group here, and Phase 2 creates a `granted-operator` group on first grant.
+/// A second implementation of "resolve, create, bind, verify the scope" is how
+/// the two paths would drift into binding at different scopes.
+pub async fn ensure_group_binding(
     client: &TenantClient,
     role: &str,
     kind: Kind,
     slug: &str,
     resource_id: Uuid,
-) -> Result<()> {
+) -> Result<String> {
     let group_name = naming::group_name(role, kind, slug)?;
 
     // Server-side search on the natural key, then an exact match: `search` is
@@ -252,7 +258,7 @@ async fn ensure_group_binding(
         );
     }
 
-    Ok(())
+    Ok(group_name)
 }
 
 /// Resolve a role by its name — the natural key `authz/catalog.toml` uses.

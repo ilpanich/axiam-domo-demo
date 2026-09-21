@@ -1,0 +1,82 @@
+# The live smoke suite: one real branch of the tree, the authorization model
+# asserted against a real AXIAM, and the device identity chain proven against a
+# real broker — positively and, more importantly, negatively.
+#
+# Same ownership split as the rest of the stack (D-34/D-35): `just` drives the
+# host, the Rust tools do the AXIAM and broker work from inside the compose
+# network, so the demo machine needs no cargo toolchain. Every recipe reuses
+# `_stage` and `_probe`, defined in `just/stack.just`.
+#
+# NOTE: `set shell` is deliberately absent. `just` refuses a setting that two
+# imported modules both define, and `just/stack.just` already sets it for the
+# whole import tree.
+#
+# # Each part runs alone, on purpose
+#
+# `smoke` composes the parts rather than duplicating them, and every part is
+# independently runnable. A failure inside a composed run is only diagnosable
+# if the part can be re-run by itself in seconds instead of after a full
+# rebuild.
+#
+# # No reset here
+#
+# `just demo-reset` is built in plan 01-07, which depends on this plan, so it
+# does not exist at this point and nothing below may call it. `smoke-teardown`
+# is this suite's clean-state mechanism: it removes only reserved-prefix
+# fixtures, so `smoke-teardown` followed by `smoke` rebuilds from an emptied
+# tenant. The reset-crossed form of the same property is `just phase-verify`,
+# in plan 01-07.
+
+# --- the branch ---------------------------------------------------------------
+
+# Build the one reserved-prefix branch — site → common → building → common →
+# apartment → device — with its structural groups and the probe's device
+# accounts. Idempotent by probe: a second run resolves everything and creates
+# nothing.
+smoke-tree:
+    @just _stage smoke
+
+# Remove every reserved-prefix fixture from both tenants, and the on-disk
+# fixture material with it. Touches nothing without the prefix.
+smoke-teardown:
+    @just _stage smoke-teardown
+
+# --- the authorization model, live -------------------------------------------
+
+# Assert the tree's shape, its empty and duplicate behaviour, the group pattern
+# and that access genuinely follows group membership — against a real AXIAM.
+# Resolves the branch rather than rebuilding it, so a failing case can be
+# re-checked in seconds.
+smoke-authz:
+    @just _stage smoke-verify
+
+# --- the device identity chain, live -----------------------------------------
+
+# The probe generates a keypair and a certificate signing request per fixture —
+# every private key stays on the probe — and `domo-bootstrap` signs them under
+# each fixture's OWN tenant CA. The cross-tenant issuance attempt runs here
+# too, because only an admin client can make it.
+smoke-certs:
+    @just _probe smoke-keys
+    @just _stage smoke-certs
+
+# The positive and negative connect matrix: one line per case, exiting non-zero
+# if any observed outcome differs from its expectation.
+smoke-matrix: smoke-certs
+    @just _probe matrix
+
+# --- the whole suite ----------------------------------------------------------
+
+# Everything, composed from the parts above rather than duplicating them.
+# Green twice back to back with no cleanup in between, and green again after
+# `smoke-teardown` has emptied the tenant of prefixed fixtures.
+smoke: smoke-tree smoke-authz smoke-matrix
+    @echo "✓ smoke"
+
+# The matrix plus the one case the fast suite cannot cover: a genuinely expired
+# device token. AXIAM issues device tokens with a fixed lifetime and offers no
+# per-request override (P-13), so this waits the token out in real time. Expiry
+# is covered at unit level in plan 01-05; this is the end-to-end version, for
+# when someone wants it.
+smoke-slow: smoke
+    @just _probe matrix-expired

@@ -6,6 +6,7 @@ pub mod device_identity;
 pub mod org_bootstrap;
 pub mod pki;
 pub mod service_certs;
+pub mod smoke;
 pub mod tenant_admin;
 pub mod tenants;
 pub mod tree;

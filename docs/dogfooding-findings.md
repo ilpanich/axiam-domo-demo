@@ -54,11 +54,12 @@ repository is the user's call, not this repository's.
 
 ## Appending
 
-Ids are sequential and never reused. The highest allocated id is **DF-024**; the
-next entry is DF-025. Plan 01-06 records the cross-tenant certificate-issuance
-outcome here, and every later phase appends its own. Keep the section shape
-uniform — the audit gate counts `## DF-` and `### Upstream issue` headings, so
-an entry that invents its own layout stops being counted.
+Ids are sequential and never reused. The highest allocated id is **DF-027**; the
+next entry is DF-028. Plan 01-06 recorded the cross-tenant certificate-issuance
+outcome — in DF-017, whose question it answers, rather than in a new entry — and
+appended DF-025 through DF-027. Every later phase appends its own. Keep the
+section shape uniform — the audit gate counts `## DF-` and `### Upstream issue`
+headings, so an entry that invents its own layout stops being counted.
 
 ---
 
@@ -320,13 +321,22 @@ The healthcheck client trusts webpki roots only and defaults to plain HTTP, so o
 
 ## DF-017 — Leaf issuance does not bind a tenant signing CA to its tenant
 
-**Component** axiam-server (`axiam-pki`) · **Severity** high · **Status** reported-from-source-reading · **Build** as pinned above
+**Component** axiam-server (`axiam-pki`) · **Severity** high · **Status** confirmed · **Build** as pinned above
 
-**Expected vs actual** — A tenant administrator should be able to issue leaves only from their **own** tenant's signing CA. **Actual:** `prepare_leaf_issuance` checks that the issuing CA belongs to the organization, is active and in-window; from source reading it does not check that a *tenant* signing CA belongs to the acting tenant — so a Lakeside admin could plausibly issue a certificate under Summit's CA, or directly under the root.
+**Expected vs actual** — A tenant administrator should be able to issue leaves only from their **own** tenant's signing CA. **Actual:** `prepare_leaf_issuance` checks that the issuing CA belongs to the organization, is active and in-window; it does **not** check that a *tenant* signing CA belongs to the acting tenant. Confirmed at runtime in plan 01-06: the Lakeside tenant admin signed a certificate request under **Summit's** signing CA and AXIAM returned a certificate.
 
-**Reproduction** — As a tenant admin, sign a CSR naming another tenant's signing CA as the issuer. A 201 confirms the gap; a 4xx closes it. Asserted negatively by plan 01-06.
+The stamping is the part that makes this more than bookkeeping. The issued leaf carries `tenant_id` = **Lakeside's** (the acting tenant's) while `issuer_ca_id` = **Summit's** signing CA. AXIAM therefore records the certificate as belonging to one tenant and signs it with another tenant's key, and nothing downstream can tell the two apart from the certificate alone.
 
-**Workaround** — `domo-bootstrap` always passes the acting tenant's own CA, so the demo never exercises the gap by accident. It is a defence-in-depth gap rather than something the demo depends on — but combined with DF-014's missing token binding, a forged-CN certificate from another tenant is the residual risk both entries point at.
+**Reproduction** — As a tenant admin, sign a CSR naming another tenant's signing CA as the issuer:
+
+```
+just smoke-certs        # the attempt runs as its last step
+just smoke-matrix       # reports it as the `cross-tenant-ca-issuance` case
+```
+
+Observed on the pinned build: certificate issued, `tenant_id` = acting tenant, `issuer_ca_id` = the other tenant's CA. The matrix fails on this case by design, so the result cannot be absorbed into a green run.
+
+**Workaround** — None available to a consumer; this is enforcement that only AXIAM can perform. `domo-bootstrap` always passes the acting tenant's own CA, so the demo never exercises the gap by accident, and `just smoke-teardown` revokes the certificate the experiment mints. That is containment, not mitigation: any tenant administrator can still do this deliberately. **See DF-025 for what the confirmed gap makes reachable end to end** — it is no longer the defence-in-depth concern this entry originally described.
 
 ### Upstream issue
 
@@ -449,3 +459,70 @@ The `subject` field of `CreateIntermediateCaRequest` expects a bare common name 
 **Title:** Login rate limit does not distinguish scripted provisioning from interactive login
 
 The default 10/min login limit is a sensible interactive default and a poor provisioning one. Any staged provisioning tool — one process per stage, each authenticating once — exceeds it within a single run, and the resulting failure surfaces as an authentication error rather than as a rate limit, which sends the operator off debugging credentials. Either exempt service-account / client-credentials authentication from the interactive limit, raise the default enough to cover a bootstrap sequence, or return a response that names the rate limit explicitly so the cause is visible from the error alone.
+
+## DF-025 — A forged-common-name certificate from another tenant's CA authenticates a device end to end
+
+**Component** axiam-server (`axiam-pki`) + the demo's broker chain · **Severity** high · **Status** confirmed · **Build** as pinned above
+
+**Expected vs actual** — A certificate signed by tenant B's authority should not be able to speak for a device of tenant A, at any layer. **Actual:** it can, and the connection is fully functional — CONNECT accepted, subscribe acknowledged, publish acknowledged, message delivered.
+
+This is DF-017's consequence rather than a separate defect, and it is worth its own entry because the two were previously believed to be separated by compensating controls. They are not. The chain, hop by hop:
+
+1. DF-017 lets tenant B's administrator mint a leaf whose subject is `CN=<tenant A device's service-account UUID>` — tenant A's device — signed by **tenant B's** signing CA.
+2. The broker's TLS trust bundle is the **organization root** (D-26, forced: the MQTT listener inherits broker-wide `ssl_options` shared with AXIAM's own AMQPS listener, so a per-tenant bundle is not expressible). Both tenant CAs chain to that root, so the forged leaf is trusted.
+3. `mqtt.ssl_cert_client_id_from = distinguished_name` compares `client_id` against the certificate subject. The forged subject **is** the impersonated device's, so this check has nothing to object to.
+4. The Device Twin checks `client_id == "CN=" + username` and `token.sub == username`. With a token for the impersonated device, both hold.
+
+The net effect: **at the broker, the client certificate contributes nothing to tenant separation.** Separation rests entirely on the bearer token. That is a narrower guarantee than the architecture's "every device certificate is issued by its own tenant's CA" was taken to provide, and it is the residual risk D-24 named — now demonstrated rather than hypothesised.
+
+**Reproduction** — `just smoke-matrix`, case `other-tenant-ca`. It presents a forged-common-name leaf (minted by the `cross-tenant-ca-issuance` experiment) with the impersonated device's own credentials, and observes a successful publish/subscribe round trip. The case fails by design, so the result cannot be absorbed into a green run.
+
+**Workaround** — None at the broker. Three things bound it in this demo, none of which is a fix:
+
+- The attacker must already be a tenant administrator of some tenant in the same organization — a privileged insider, not an outsider.
+- A valid token for the impersonated device is still required; the forged certificate alone opens nothing.
+- `just smoke-teardown` revokes the forged certificate the experiment mints.
+
+Closing DF-017 closes this. Failing that, tenant separation at the broker would have to move to something the broker can see per-tenant, which the MQTT plugin's inherited `ssl_options` currently prevents.
+
+### Upstream issue
+
+**Title:** A tenant's signing CA can mint a certificate impersonating another tenant's service account
+
+Because leaf issuance does not verify that the issuing tenant signing CA belongs to the acting tenant (see the companion issue for `prepare_leaf_issuance`), a tenant administrator can obtain a certificate whose subject is another tenant's service-account identifier, signed by their own tenant's CA. Any relying party that anchors on the organization root — which is the only anchor available to a service that must serve several tenants on one TLS listener — will accept it, and the certificate subject then matches the impersonated account exactly. We confirmed a full MQTT session established this way against RabbitMQ 4.3.6 with `verify_peer`, `fail_if_no_peer_cert` and `ssl_cert_client_id_from = distinguished_name` all in force. Rejecting an issuer CA whose tenant differs from the acting principal's would close it; a subject-namespace check at issuance would close it more narrowly.
+
+## DF-026 — The console image cannot start when its upstream is merely absent
+
+**Component** axiam-frontend (published console image) · **Severity** medium · **Status** confirmed · **Build** as pinned above
+
+**Expected vs actual** — A console container whose backend is not up yet should start and serve an error, or wait. **Actual:** nginx resolves its `proxy_pass` upstreams at configuration load time, so with no `axiam-server` container present it exits immediately with `[emerg] host not found in upstream` and enters a restart loop.
+
+This is a startup-ordering fragility in the published image rather than an operator misconfiguration: a consumer composing the console alone, or with the server starting later, gets a crash-looping container instead of a console. It is also the kind of failure that reads as a networking problem for some time before the log is examined.
+
+**Reproduction** — Observed in plan 01-03 while composing the console without the server. Start the `axiam-frontend` image with no resolvable `axiam-server` host on its network.
+
+**Workaround** — `depends_on: axiam-server` in the compose file, which makes the ordering explicit. It does not help a restart in which the server is slower to come back, so it is an ordering fix rather than a robustness one.
+
+### Upstream issue
+
+**Title:** nginx resolves proxy upstreams at config load, so the console crash-loops when the API is not yet up
+
+The console image's nginx configuration names its upstreams directly in `proxy_pass`, which makes nginx resolve them when the configuration is loaded. If the API host does not resolve at that moment, nginx exits with `[emerg] host not found in upstream` and the container restart-loops rather than serving. Setting a `resolver` and passing the upstream through a variable (`set $upstream http://axiam-server:8090; proxy_pass $upstream;`) defers resolution to request time, so the console starts regardless of ordering and returns a 502 until the API is reachable — which is a much more diagnosable failure than a container that will not stay up.
+
+## DF-027 — An unbound device certificate is refused with 403, not 401
+
+**Component** axiam-server (`POST /api/v1/auth/device`) · **Severity** low · **Status** confirmed · **Build** as pinned above
+
+**Expected vs actual** — A certificate that is valid TLS material but bound to no service account "authenticates as nobody", which reads as an authentication failure: 401. **Actual:** AXIAM answers **403**.
+
+Recorded because the distinction matters to a client deciding what to do next. A 401 says *these credentials did not identify you* — re-authenticate. A 403 says *you are identified and not permitted* — do not retry. Here the cause is the former (no binding, therefore no subject) while the status says the latter, so a client implementing the conventional reaction to each will do the wrong thing.
+
+**Reproduction** — Issue a certificate for a service account and do **not** call `bind_certificate`, then `POST /api/v1/auth/device` with it over mTLS. `just smoke-matrix`, case `empty-cert-binding`, asserts this; the demo's fixture `smoke-unbound-device` exists precisely to hold that state.
+
+**Workaround** — None needed; the demo asserts 401 or 403 and fails on a 200, so the security property is pinned without depending on which of the two AXIAM returns.
+
+### Upstream issue
+
+**Title:** Device mTLS login returns 403 for a certificate bound to no service account
+
+A device certificate that was issued but never bound resolves to no principal at all, so the request is unauthenticated rather than unauthorised. Returning 403 tells a client it has been identified and refused, which is the one thing that did not happen, and steers a conventional client away from the retry-after-re-authentication path that would actually be correct. 401 would describe the state accurately. If 403 is deliberate — for instance to avoid distinguishing "unknown certificate" from "known but unbound" to an unauthenticated caller — that reasoning is worth stating in the endpoint's documentation, because it is not inferable from the response.

@@ -71,6 +71,20 @@ enum Stage {
     Tree,
     /// Assert every Phase 1 authorization invariant.
     AuthzVerify,
+    /// Build the one reserved-prefix branch of the tree, with its structural
+    /// groups and the probe's device accounts (D-18).
+    Smoke,
+    /// Assert the authorization model against live AXIAM over the smoke branch
+    /// (AUTHZ-01, AUTHZ-02).
+    SmokeVerify,
+    /// Sign every smoke fixture's certificate request, and attempt the
+    /// cross-tenant issuance the matrix records either way (PKI-03, DF-017).
+    SmokeCerts,
+    /// Remove every reserved-prefix fixture, and nothing else.
+    ///
+    /// This plan's clean-state mechanism: `just demo-reset` arrives with plan
+    /// 01-07, which depends on this one, so nothing here may call it.
+    SmokeTeardown,
     /// Apply `authz/catalog.toml` to one tenant (D-16).
     Catalog {
         /// Tenant slug to apply the catalog to.
@@ -113,6 +127,10 @@ async fn main() -> Result<()> {
         Stage::ServiceCerts => stages::service_certs::run().await,
         Stage::Tree => stages::tree::run().await,
         Stage::AuthzVerify => stages::verify_all().await,
+        Stage::Smoke => stages::smoke::run().await,
+        Stage::SmokeVerify => stages::smoke::assertions::run().await,
+        Stage::SmokeCerts => stages::smoke::certs::run().await,
+        Stage::SmokeTeardown => stages::smoke::teardown::run().await,
         Stage::Catalog { tenant, plan_only } => {
             stages::catalog::run(&tenant, plan_only).await
         }
