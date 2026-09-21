@@ -1,0 +1,90 @@
+/* Front door styling (D-31): deliberately minimal and entirely self-contained.
+ *
+ * No web font, no image, no CDN — the Content-Security-Policy served with this
+ * page is `default-src 'self'` and Phase 5 inherits it verbatim, so anything
+ * fetched cross-origin would have to loosen a policy that exists to protect the
+ * portals. System fonts and one hand-written sheet cost nothing and keep the
+ * page's only network request the page itself. */
+
+:root {
+  --ink: #12161c;
+  --ink-soft: #55606e;
+  --line: #dde3ea;
+  --surface: #ffffff;
+  --page: #f5f7fa;
+  --accent: #1b5e9c;
+  --pending: #8a6d1f;
+  --pending-bg: #fdf6e0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8edf3;
+    --ink-soft: #9aa7b6;
+    --line: #2b3440;
+    --surface: #161c24;
+    --page: #0e1218;
+    --accent: #7fb6e8;
+    --pending: #e0c273;
+    --pending-bg: #2a2412;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2.5rem 1.25rem 4rem;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main { max-width: 46rem; margin: 0 auto; }
+
+h1 { font-size: 1.9rem; margin: 0 0 .4rem; letter-spacing: -.01em; }
+h2 { font-size: 1.05rem; margin: 2.5rem 0 .75rem; text-transform: uppercase;
+     letter-spacing: .08em; color: var(--ink-soft); }
+p { margin: 0 0 .9rem; }
+
+.lede { color: var(--ink-soft); font-size: 1.05rem; max-width: 34rem; }
+
+.tiles { list-style: none; margin: 0; padding: 0; display: grid; gap: .75rem;
+         grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
+
+.tile {
+  display: flex; flex-direction: column; gap: .35rem;
+  padding: 1rem; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface);
+}
+
+/* "Coming in Phase 5", not "broken link": a tile that looks clickable and is
+ * not is the single most common way a demo front door reads as unfinished. */
+.tile.pending { opacity: .85; }
+.tile-name { font-weight: 600; }
+.tile-note { color: var(--ink-soft); font-size: .875rem; }
+
+.badge {
+  align-self: flex-start; margin-top: .25rem;
+  padding: .15rem .5rem; border-radius: 999px;
+  background: var(--pending-bg); color: var(--pending);
+  font-size: .75rem; font-weight: 600; letter-spacing: .02em;
+}
+
+a { color: var(--accent); }
+.cta { font-weight: 600; word-break: break-all; }
+
+.fingerprint {
+  margin: 0 0 .9rem; padding: .85rem 1rem; overflow-x: auto;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface);
+}
+
+.fingerprint code {
+  font: .8125rem/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-all;
+}
+
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.fine { color: var(--ink-soft); font-size: .875rem; }

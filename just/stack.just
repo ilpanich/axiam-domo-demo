@@ -69,9 +69,25 @@ preflight:
 
 # Mint every `generated`-marked compose variable, once. Never regenerated:
 # RabbitMQ applies its default user only on the first boot of an empty volume,
-# so a regenerated password would silently stop matching the broker.
+# so a regenerated password would silently stop matching the broker. PostgreSQL
+# behaves identically with its own data volume.
+#
+# "Never regenerated" is not the same as "never added to". A checkout that was
+# provisioned before a later plan introduced a new generated key would otherwise
+# hit that key's `:?generated - run 'just up'` guard forever, and the guard's
+# advice would be a lie: `just up` would refuse for the same reason. The loop in
+# the already-minted branch tops up any key that is MISSING and touches none
+# that is present. Every future generated key belongs in that list.
 secrets:
-    @if [ -f "{{env_file}}" ]; then echo "  ✓ secrets already minted"; exit 0; fi; \
+    @if [ -f "{{env_file}}" ]; then \
+        umask 077; \
+        for k in POSTGRES_PASSWORD; do \
+            grep -q "^$k=" "{{env_file}}" && continue; \
+            echo "$k=$(openssl rand -hex 24)" >> "{{env_file}}"; \
+            echo "  ✓ added missing $k to the existing {{env_file}}"; \
+        done; \
+        echo "  ✓ secrets already minted"; exit 0; \
+    fi; \
     echo "→ minting stack secrets"; \
     umask 077; mkdir -p .secrets; \
     hex() { openssl rand -hex 32; }; \
@@ -84,6 +100,9 @@ secrets:
       echo "AXIAM__DB__PASSWORD=$(openssl rand -hex 24)"; \
       echo "RABBITMQ_DEFAULT_USER=domo_$(openssl rand -hex 4)"; \
       echo "RABBITMQ_DEFAULT_PASS=$(openssl rand -hex 24)"; \
+      echo "# Applied only on the first boot of an empty postgres-data volume,"; \
+      echo "# exactly like RabbitMQ's above — hence persisted, not regenerated."; \
+      echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"; \
       echo "AXIAM__AUTH__PEPPER=$(hex)"; \
       echo "AXIAM__AUTH__MFA_ENCRYPTION_KEY=$(hex)"; \
       echo "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY=$(hex)"; \
@@ -113,9 +132,18 @@ build:
     @echo "→ building images"
     @just _dc build device-twin domo-bootstrap
 
-up: preflight secrets pki build
+# `export-trust` (just/pki.just) is a dependency, not a convenience: the `caddy`
+# service bind-mounts dist/trust/domo-root.sha256 as the landing page's
+# fingerprint source, and Docker silently creates a DIRECTORY at a bind-mount
+# target whose source does not exist. Exporting first is what keeps that from
+# becoming a 500 on `/` that looks like a template bug.
+up: preflight secrets pki export-trust build
     @echo "→ starting the stack"
-    @just _dc up -d surrealdb rabbitmq axiam-server device-twin
+    @# No service list: every service that is not behind the `tools` profile
+    @# starts here. Phase 1 adds caddy, axiam-frontend and postgres to this one
+    @# file (D-06 — one compose file, no per-host override), and an explicit
+    @# list is exactly how a service silently stops being part of `just up`.
+    @just _dc up -d
     @just _wait-axiam
 
 down:

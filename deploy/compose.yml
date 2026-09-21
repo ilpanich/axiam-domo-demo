@@ -84,6 +84,29 @@ services:
         chown -R 65532:65532 /out/twin
         chmod 0644 /out/twin/root.pem /out/twin/server.pem
         chmod 0600 /out/twin/server.key
+        # caddy (official image runs as root)
+        cp /pki/root.pem /out/caddy/root.pem
+        cp /pki/caddy.pem /out/caddy/server.pem
+        cp /pki/caddy.key /out/caddy/server.key
+        chown -R 0:0 /out/caddy
+        chmod 0644 /out/caddy/root.pem /out/caddy/server.pem
+        chmod 0600 /out/caddy/server.key
+        # axiam-frontend gets the PUBLIC root and nothing else. Its nginx needs
+        # a trusted-certificate file for proxy_ssl_verify even on the paths
+        # Caddy claims before it ever sees them; a missing file fails its
+        # config test at startup. No private key is published here.
+        cp /pki/root.pem /out/frontend/root.pem
+        chmod 0644 /out/frontend/root.pem
+        # postgres (alpine image's postgres user is 70:70). PostgreSQL refuses
+        # to start with a key readable by anyone else, so 0600 owned by 70 is
+        # not a preference — it is the only accepted combination short of
+        # root-owned 0640 (P-6).
+        cp /pki/root.pem /out/postgres/root.pem
+        cp /pki/postgres.pem /out/postgres/server.pem
+        cp /pki/postgres.key /out/postgres/server.key
+        chown -R 70:70 /out/postgres
+        chmod 0644 /out/postgres/root.pem /out/postgres/server.pem
+        chmod 0600 /out/postgres/server.key
         # Shared runtime state: the bootstrap (host uid) writes the tenant map
         # here and the Twin (65532) reads it. A named volume rather than a bind
         # mount of `.secrets/state`, because that tree is 0700 by design — it
@@ -91,12 +114,15 @@ services:
         # non-secret lookup table can be read out of it.
         chown ${DOMO_UID:-1000}:${DOMO_GID:-1000} /out/state
         chmod 0755 /out/state
-        echo "tls-init: published PKI into 3 volumes"
+        echo "tls-init: published PKI into 6 volumes"
     volumes:
       - ../.secrets/pki:/pki:ro
       - axiam-tls:/out/axiam
       - rabbitmq-tls:/out/rabbitmq
       - twin-tls:/out/twin
+      - caddy-tls:/out/caddy
+      - frontend-tls:/out/frontend
+      - postgres-tls:/out/postgres
       - twin-state:/out/state
     restart: "no"
 
@@ -225,7 +251,22 @@ services:
 
       AXIAM__AUTH__WEBAUTHN_RP_ID: "${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
       AXIAM__AUTH__WEBAUTHN_RP_ORIGIN: "https://${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
-      # No proxy in front of :8090 in the tracer — devices reach it directly.
+      # Kept at 0 now that Caddy fronts the browser traffic, and that is a
+      # deliberate choice rather than an oversight.
+      #
+      # :8090 is reached BOTH ways: browsers arrive through exactly one Caddy
+      # hop, and devices arrive directly from the LAN (D-05). A non-zero value
+      # means "trust that many X-Forwarded-For entries" — and a device on the
+      # LAN talking straight to this listener can set that header to anything
+      # it likes, which would hand it a free rate-limit bypass. 0 says "trust
+      # only the peer address", which is correct for the direct path and, for
+      # the proxied path, attributes browser traffic to Caddy's container
+      # address. On a LAN-only demo with LOGIN_PER_MIN raised to 120 that
+      # shared bucket costs nothing; a forgeable client address would.
+      #
+      # The Caddyfile is what keeps this to ONE hop: it splits /api, /oauth2/
+      # and /.well-known straight to this service on BOTH hosts rather than
+      # letting the console's own nginx proxy them a second time.
       AXIAM__RATE_LIMIT__TRUSTED_HOPS: "0"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
     volumes:
@@ -311,6 +352,148 @@ services:
     networks: [domo-network]
 
   # ---------------------------------------------------------------------------
+  # PostgreSQL — the Management Platform's and the Device Twin's database.
+  #
+  # ONE instance, TWO schemas, and each service owns and migrates only its own:
+  # Phase 2's Management Platform through Flyway, Phase 3's Twin through
+  # `sqlx migrate`. Phase 1 deliberately creates the database and the TLS
+  # posture and NOTHING else — no table, no migration, no ORM schema. A schema
+  # created here would have no owner and no migration history, and the first
+  # service to run its own migrations would have to reconcile with it.
+  #
+  # Unpublished, and it stays that way in every phase (D-05, T-03-07): only 443,
+  # 8090 and 8883 leave the Docker network. `docker compose port postgres 5432`
+  # printing nothing is an assertion in `just pg-verify`, not an accident.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    # The whole server configuration lives in the mounted file. The official
+    # image's entrypoint still runs initdb, still writes pg_hba.conf into
+    # PGDATA, and still appends its host rule there — the config file names
+    # those paths explicitly so none of that is lost.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.tls.conf"]
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-domo}"
+      POSTGRES_DB: "${POSTGRES_DB:-domo}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?generated - run 'just up', which mints it into .secrets/generated.env}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-tls:/etc/postgresql/tls:ro
+      - ./postgres/postgresql.tls.conf:/etc/postgresql/postgresql.tls.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          # shared_buffers 160MB + 40 x work_mem 4MB worst case + backends and
+          # the OS page cache the planner is told about. 512MB leaves headroom
+          # on the Pi's 4 GB budget without letting a runaway query take the
+          # whole machine down with it.
+          memory: 512M
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # Caddy — the single browser-facing origin (PLAT-06, D-30).
+  #
+  # The ONLY service that publishes 443. Everything a browser touches arrives
+  # here: the static front door, the portals (Phase 5), the Twin under
+  # /api/twin, the reserved /api/mgmt, and AXIAM unprefixed. The console lives
+  # on axiam.${DOMO_HOST}, served by the same listener and the same
+  # certificate — one listener, two hosts, two cookie jars.
+  #
+  # Certificates come from tls-init like every other service; Caddy mints
+  # nothing (`auto_https off`, static `tls <cert> <key>`). There is one trust
+  # anchor in this demo and Caddy's internal CA would be a second one.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2.11-alpine
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    ports:
+      # D-05: 443 is a browser-facing port and belongs on the LAN.
+      - "${DOMO_LAN_IP:?operator must set DOMO_LAN_IP - see .env.example}:443:443"
+      # Also on the loopback, for the same reason axiam-server is: a laptop
+      # that changes networks must still be verifiable from its own terminal.
+      - "127.0.0.1:443:443"
+    environment:
+      # Both site blocks are addressed through this one name.
+      DOMO_HOST: "${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-tls:/etc/caddy/tls:ro
+      # The site root is assembled FILE BY FILE rather than by mounting
+      # ./landing as a directory. Two reasons, one practical and one security:
+      #
+      #   Practical: the fingerprint and the trust document live outside
+      #   ./landing (they are generated and shared artifacts), and runc cannot
+      #   create a mountpoint inside a read-only bind mount — nesting them under
+      #   a `./landing:...:ro` mount fails at container start with
+      #   "make mountpoint: read-only file system".
+      #
+      #   Security: this is an exhaustive list of what the front door can serve.
+      #   A directory mount would serve whatever later lands in it; T-03-06 says
+      #   the root certificate must never be downloadable, and the strongest
+      #   form of that is "no route can reach a file nobody listed here".
+      #
+      # Phase 5's portals are separate routes and separate mounts; they do not
+      # go in this directory.
+      - ./landing/index.html:/srv/landing/index.html:ro
+      - ./landing/style.css:/srv/landing/style.css:ro
+      # The root's SHA-256 fingerprint, written by `just export-trust` and
+      # rendered into the page by Caddy's `templates` at request time (D-31,
+      # D-14). The fingerprint is public and comparing it is the whole point;
+      # the CERTIFICATE is deliberately absent from this container entirely.
+      - ../dist/trust/domo-root.sha256:/srv/landing/fingerprint.txt:ro
+      # The import instructions the landing page links to, so an operator on the
+      # presenting machine can follow them without a checkout of this repository.
+      - ../docs/trust.md:/srv/landing/trust.md:ro
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
+  # The AXIAM admin console (D-03).
+  #
+  # Unpublished: Caddy is the only way in. Its own nginx would happily proxy
+  # /api, /oauth2/ and /.well-known to axiam-server, but the Caddyfile claims
+  # those paths first so every request stays exactly one hop from the edge —
+  # which is what AXIAM__RATE_LIMIT__TRUSTED_HOPS assumes. The three vars below
+  # stay wired anyway: they are what the image's nginx config test validates at
+  # startup, and a missing CA file there is a hard boot failure.
+  # ---------------------------------------------------------------------------
+  axiam-frontend:
+    image: ghcr.io/ilpanich/axiam/frontend:${AXIAM_IMAGE_TAG:?operator must set AXIAM_IMAGE_TAG - see .env.example}
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+      # NOT ordering pedantry — this image cannot start without it. nginx
+      # resolves every `proxy_pass` upstream at CONFIG LOAD, so with no
+      # `axiam-server` container in existence it exits immediately with
+      # `[emerg] host not found in upstream "axiam-server"`. Observed, not
+      # assumed: a stack brought up without axiam-server put this service into a
+      # restart loop that reads like a broken image. `service_started` rather
+      # than `service_healthy` because axiam-server's own healthcheck is
+      # disabled here (P-4) — the container merely has to EXIST for Docker's
+      # embedded DNS to answer.
+      axiam-server:
+        condition: service_started
+    environment:
+      AXIAM_BACKEND_ORIGIN: "https://axiam-server:8090"
+      AXIAM_BACKEND_SNI: "axiam-server"
+      AXIAM_BACKEND_CA: "/etc/axiam/tls/root.pem"
+    volumes:
+      - frontend-tls:/etc/axiam/tls:ro
+    restart: unless-stopped
+    networks: [domo-network]
+
+  # ---------------------------------------------------------------------------
   # Bootstrap / probe tooling — one-shot, never started by `up`.
   #
   # Run as `docker compose run --rm domo-bootstrap <stage>`. Running the API
@@ -383,9 +566,18 @@ services:
 volumes:
   surrealdb-data:
   rabbitmq-data:
+  # Its own named volume, distinct from AXIAM's SurrealDB store: `just
+  # demo-reset` wipes both, and a shared volume would make "reset the demo
+  # data" and "reset AXIAM" the same irreversible action.
+  postgres-data:
   axiam-tls:
   rabbitmq-tls:
   twin-tls:
+  caddy-tls:
+  # The public root only — deliberately a separate volume from caddy-tls so the
+  # console image never has the edge's private key on its filesystem.
+  frontend-tls:
+  postgres-tls:
   twin-state:
 
 networks:
