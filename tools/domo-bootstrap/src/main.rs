@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
         Stage::Smoke => stages::smoke::run().await,
         Stage::SmokeVerify => stages::smoke::assertions::run().await,
         Stage::SmokeCerts => stages::smoke::certs::run().await,
-        Stage::SmokeTeardown => stages::smoke::teardown().await,
+        Stage::SmokeTeardown => stages::smoke::teardown::run().await,
         Stage::Catalog { tenant, plan_only } => {
             stages::catalog::run(&tenant, plan_only).await
         }

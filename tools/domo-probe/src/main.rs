@@ -16,6 +16,7 @@
 //! The C++ SDK has `authenticate_device()`; the Rust one does not.
 
 mod cases;
+mod fixtures;
 mod matrix;
 
 use std::sync::Arc;
