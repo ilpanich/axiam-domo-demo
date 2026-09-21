@@ -57,4 +57,12 @@ base64 = "0.22"
 sha2 = "0.10"
 url = "2"
 
+# Test-only dependencies (see `services/device-twin/Cargo.toml`).
+# `wiremock` is the same 0.6 line the AXIAM SDK's own test suite uses;
+# `jsonwebtoken` is already in the tree transitively via `axiam-sdk`, pinned
+# here to the same major so the fixture signer and the SDK's verifier cannot
+# drift apart.
+wiremock = "0.6"
+jsonwebtoken = "11"
+
 domo-common = { path = "crates/domo-common" }
