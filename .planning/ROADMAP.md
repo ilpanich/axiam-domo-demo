@@ -32,7 +32,7 @@ The demo is built as six horizontal technical layers, in dependency order: a fou
   3. All browser-facing traffic is reachable through a single Caddy origin proxying to AXIAM, and the AXIAM resource tree (portfolio → site → common/building → apartment → device) plus the group-per-(role, resource) pattern exist and are queryable via the AXIAM API (PLAT-06, AUTHZ-01, AUTHZ-02).
   4. A single test device authenticates to AXIAM over mTLS, receives a JWT, and connects to the `domo` MQTT vhost using cert + JWT, validated end-to-end by a working RabbitMQ HTTP auth backend (MQTT-01, MQTT-02).
 
-**Plans**: 1/7 plans executed (4 waves)
+**Plans**: 4/7 plans executed (4 waves)
 Plans:
 **Wave 1**
 
@@ -40,9 +40,9 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — Whole-chain PKI verification, root export and trust docs, secrets guard, dogfooding findings log (wave 2)
-- [ ] 01-04-PLAN.md — AuthZ catalog, per-tenant admin, signing CAs, service credentials, resource tree and group pattern (wave 2)
-- [ ] 01-05-PLAN.md — Device Twin RabbitMQ auth backend: full four-endpoint contract with offline test suite (wave 2)
+- [x] 01-02-PLAN.md — Whole-chain PKI verification, root export and trust docs, secrets guard, dogfooding findings log (wave 2)
+- [x] 01-04-PLAN.md — AuthZ catalog, per-tenant admin, signing CAs, service credentials, resource tree and group pattern (wave 2)
+- [x] 01-05-PLAN.md — Device Twin RabbitMQ auth backend: full four-endpoint contract with offline test suite (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -135,7 +135,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 1/7 | In Progress|  |
+| 1. Foundation | 4/7 | In Progress|  |
 | 2. Management Platform | 0/TBD | Not started | - |
 | 3. Device Twin + MQTT | 0/TBD | Not started | - |
 | 4. Simulators | 0/TBD | Not started | - |
