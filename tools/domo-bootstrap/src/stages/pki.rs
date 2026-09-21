@@ -176,3 +176,66 @@ pub async fn run() -> Result<()> {
     domo_common::secrets::mark_done("pki")?;
     Ok(())
 }
+
+/// Assert exactly one signing CA per demo tenant, and none for the reserved
+/// `organization` tenant (PKI-02).
+///
+/// Asserted by count in both directions. The edge probe for PKI-02 came back
+/// unclassified, so the operative reading is recorded here rather than left
+/// implicit: one signing CA per tenant, no more and no fewer. Plan 01-01 found
+/// the "no more" half the hard way — a stage that looped over every tenant
+/// AXIAM returned minted a CA for `organization` that nothing would ever issue
+/// from.
+pub async fn verify(org: &super::OrgClient) -> Result<bool> {
+    let mut passed = true;
+
+    for tenant in org.demo_tenants().await? {
+        let cas = org
+            .ca_certificates()
+            .in_org(org.org_id)
+            .list_signing_cas_all(tenant.id, PageRequest::first(100))
+            .await
+            .with_context(|| format!("listing signing CAs for '{}'", tenant.slug))?;
+        if cas.len() == 1 {
+            super::ok(&format!("signing-cas  {}  1", tenant.slug));
+        } else {
+            super::fail(&format!(
+                "signing-cas  {} has {} signing CAs, expected 1",
+                tenant.slug,
+                cas.len()
+            ));
+            passed = false;
+        }
+    }
+
+    // The reserved tenant must hold none: a CA there is an object with no
+    // issuer downstream of it, and it breaks the per-tenant count above.
+    let all = org
+        .tenants()
+        .in_org(org.org_id)
+        .list_all(PageRequest::first(100))
+        .await
+        .context("listing tenants")?;
+    if let Some(reserved) = all
+        .iter()
+        .find(|t| t.slug == domo_common::ORG_TENANT_SLUG)
+    {
+        let cas = org
+            .ca_certificates()
+            .in_org(org.org_id)
+            .list_signing_cas_all(reserved.id, PageRequest::first(100))
+            .await
+            .context("listing signing CAs for the reserved organization tenant")?;
+        if cas.is_empty() {
+            super::ok("signing-cas  organization  0 (reserved tenant, correct)");
+        } else {
+            super::fail(&format!(
+                "signing-cas  the reserved organization tenant holds {} signing CA(s), expected 0",
+                cas.len()
+            ));
+            passed = false;
+        }
+    }
+
+    Ok(passed)
+}

@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# A library target as well as a binary: the pure parts (`naming`, `catalog`)
+# are unit-testable without a server, and an integration test under `tests/`
+# cannot import from a binary crate.
+[lib]
+name = "domo_bootstrap"
+path = "src/lib.rs"
+
 [[bin]]
 name = "domo-bootstrap"
 path = "src/main.rs"
@@ -18,11 +25,13 @@ domo-common = { workspace = true }
 axiam-sdk = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+rcgen = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

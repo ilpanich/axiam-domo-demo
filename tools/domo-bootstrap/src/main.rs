@@ -12,10 +12,9 @@
 //! source of truth: delete every marker and a re-run still converges to the
 //! same objects instead of duplicating them (P-8).
 
-mod stages;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use domo_bootstrap::stages;
 
 #[derive(Parser)]
 #[command(name = "domo-bootstrap", about = "Provision AXIAM for the Domo demo")]
@@ -63,6 +62,24 @@ enum Stage {
     },
     /// Create the `domo` MQTT vhost, touching no other vhost.
     Broker,
+    /// Provision each tenant's admin user — the principal every tenant-scoped
+    /// stage logs in as (D-37).
+    TenantAdmin,
+    /// Issue one service account and certificate per (service, tenant) (D-20).
+    ServiceCerts,
+    /// Create each tenant's `portfolio` root and its structural group (D-18).
+    Tree,
+    /// Assert every Phase 1 authorization invariant.
+    AuthzVerify,
+    /// Apply `authz/catalog.toml` to one tenant (D-16).
+    Catalog {
+        /// Tenant slug to apply the catalog to.
+        #[arg(long)]
+        tenant: String,
+        /// Report what would change and write nothing.
+        #[arg(long)]
+        plan_only: bool,
+    },
 }
 
 #[tokio::main]
@@ -92,5 +109,12 @@ async fn main() -> Result<()> {
             stages::device_identity::sign(&csr, &out, &tenant).await
         }
         Stage::Broker => stages::broker::run().await,
+        Stage::TenantAdmin => stages::tenant_admin::run().await,
+        Stage::ServiceCerts => stages::service_certs::run().await,
+        Stage::Tree => stages::tree::run().await,
+        Stage::AuthzVerify => stages::verify_all().await,
+        Stage::Catalog { tenant, plan_only } => {
+            stages::catalog::run(&tenant, plan_only).await
+        }
     }
 }
