@@ -153,12 +153,29 @@ pub fn decide_user(f: &UserFacts<'_>) -> Decision {
     decide::decide_user(f)
 }
 
+/// Log why a request did not parse, then deny.
+///
+/// `deny_unknown_fields` is deliberately strict, and a broker minor that adds a
+/// parameter therefore denies — the safe direction. But a bare "request did not
+/// parse" is undiagnosable from the outside: the broker reports only `access
+/// refused`, and nothing anywhere names the field. serde's message does
+/// (`unknown field 'X', expected one of ...`), so it is logged.
+///
+/// Used on the vhost, resource and topic endpoints only. The CONNECT endpoint
+/// carries the device's access token in `password`, and no parse error from
+/// that body is worth the risk of a serde message quoting part of it (T-05-07).
+fn deny_unparsed(endpoint: &'static str, e: &actix_web::Error) -> HttpResponse {
+    tracing::debug!(endpoint, error = %e, "request did not parse");
+    reply(Decision::Deny(DenyReason::MalformedRequest))
+}
+
 async fn rmq_vhost(
     form: Result<web::Form<VhostReq>, actix_web::Error>,
     st: web::Data<TwinState>,
 ) -> HttpResponse {
-    let Ok(form) = form else {
-        return reply(Decision::Deny(DenyReason::MalformedRequest));
+    let form = match form {
+        Ok(f) => f,
+        Err(e) => return deny_unparsed("vhost", &e),
     };
     let r = form.into_inner();
     reply(decide_vhost(
@@ -172,8 +189,9 @@ async fn rmq_resource(
     form: Result<web::Form<ResourceReq>, actix_web::Error>,
     st: web::Data<TwinState>,
 ) -> HttpResponse {
-    let Ok(form) = form else {
-        return reply(Decision::Deny(DenyReason::MalformedRequest));
+    let form = match form {
+        Ok(f) => f,
+        Err(e) => return deny_unparsed("resource", &e),
     };
     let r = form.into_inner();
     reply(decide_resource(
@@ -190,8 +208,9 @@ async fn rmq_topic(
     form: Result<web::Form<TopicReq>, actix_web::Error>,
     st: web::Data<TwinState>,
 ) -> HttpResponse {
-    let Ok(form) = form else {
-        return reply(Decision::Deny(DenyReason::MalformedRequest));
+    let form = match form {
+        Ok(f) => f,
+        Err(e) => return deny_unparsed("topic", &e),
     };
     let r = form.into_inner();
     reply(decide_topic(

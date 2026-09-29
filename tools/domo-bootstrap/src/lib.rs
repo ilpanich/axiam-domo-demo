@@ -7,5 +7,7 @@
 //! database to be up.
 
 pub mod catalog;
+pub mod checklist;
 pub mod naming;
 pub mod stages;
+pub mod state;

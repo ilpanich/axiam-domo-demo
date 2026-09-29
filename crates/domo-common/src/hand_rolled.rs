@@ -69,13 +69,11 @@ impl HandRolled {
 
     fn headers(&self, tenant: Option<Uuid>, mutating: bool) -> Result<HeaderMap> {
         let mut h = HeaderMap::new();
-        if mutating {
-            if let Some(csrf) = &self.csrf {
-                h.insert(
-                    CSRF_HEADER,
-                    HeaderValue::from_str(csrf).context("malformed CSRF token")?,
-                );
-            }
+        if let Some(csrf) = self.csrf.as_ref().filter(|_| mutating) {
+            h.insert(
+                CSRF_HEADER,
+                HeaderValue::from_str(csrf).context("malformed CSRF token")?,
+            );
         }
         if let Some(t) = tenant {
             h.insert(

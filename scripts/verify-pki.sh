@@ -325,14 +325,28 @@ verify_live() {
         # TLS (RabbitMQ publishes the plain-HTTP management UI alongside MQTTS).
         # Narrow to the ports that complete a handshake at all, so a non-TLS
         # port is never mistaken for a broken TLS listener.
-        local addr tls_addrs=""
+        #
+        # SNI is REQUIRED here, not optional. Caddy runs with `auto_https off`
+        # and only host-keyed site blocks, so it has no default site and refuses
+        # a handshake that names no server. Without `-servername` this probe
+        # found no TLS port on `caddy` and the row was reported as
+        # "published, but no port answered a TLS handshake" — which reads as a
+        # fault in Caddy rather than a limitation of the probe, and silently
+        # dropped the edge from the suite's coverage (found by plan 01-03).
+        # The first DNS SAN is the row's own name for itself, which is exactly
+        # what a client would send.
+        local addr tls_addrs="" probe_sni=()
+        local first_dns="${sans#*DNS:}"; first_dns="${first_dns%%,*}"
+        case "$sans" in
+            *DNS:*) probe_sni=(-servername "$first_dns") ;;
+        esac
         for addr in $endpoints; do
-            if openssl s_client -connect "$addr" </dev/null >/dev/null 2>&1; then
+            if openssl s_client -connect "$addr" "${probe_sni[@]}" </dev/null >/dev/null 2>&1; then
                 tls_addrs="${tls_addrs} ${addr}"
             fi
         done
         if [ -z "$tls_addrs" ]; then
-            skip "${name}: published, but no port answered a TLS handshake"
+            skip "${name}: published, but no port answered a TLS handshake (probed with SNI ${first_dns:-<none>})"
             continue
         fi
 
