@@ -3,34 +3,34 @@ phase: 01
 review: 01-REVIEW.md
 titles: json
 findings:
+  - id: WR-01
+    severity: warning
+    disposition: open
+    title: "`--live-only ROW` passes, printing `✓`, after checking zero identities when the row declares no SAN entries"
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "NC12 can pass without ever reaching the published-ports branch it claims to test"
+  - id: WR-03
+    severity: warning
+    disposition: open
+    title: "Residual of prior WR-02: a successful compose answer with no publishers is still a green skip for a row that publishes"
+  - id: IN-01
+    severity: info
+    disposition: open
+    title: "The compose-failure hint always blames `COMPOSE_PROJECT_NAME`, and \"daemon stopped\" has changed from skip to fail without a documentation update"
+  - id: IN-02
+    severity: info
+    disposition: open
+    title: "`_declared` is a global array shared by `verify_leaf` and `verify_live`"
   - id: CR-01
     severity: critical
     disposition: open
     title: "The live check never verifies the declared name or IP, so \"TLS 1.3 verified for <name>\" is false assurance"
-  - id: WR-01
-    severity: warning
-    disposition: open
-    title: "Stack detection fails open on a compose error: a live stack is reported as \"skipped (stack down)\" and ✓ verify-pki"
-  - id: WR-02
-    severity: warning
-    disposition: open
-    title: "\"No published port\" is inferred from a command whose failure is swallowed, so a compose error on a publishing row becomes a green skip"
-  - id: WR-03
-    severity: warning
-    disposition: open
-    title: "`group()` in `just verify` now returns non-zero on a clean pass"
   - id: WR-04
     severity: warning
     disposition: open
     title: "The CPU hogs' lifetime is a fixed 600 s, not tied to the iteration count, so large runs fail spuriously"
-  - id: IN-01
-    severity: info
-    disposition: open
-    title: "The advertised `source scripts/verify-pki.sh` usage leaks `set -euo pipefail` and `cd` into the caller"
-  - id: IN-02
-    severity: info
-    disposition: open
-    title: "The negative controls are fixed to rabbitmq whatever `row` is, and `tls_ep` is not normalised"
   - id: IN-03
     severity: info
     disposition: open
@@ -45,23 +45,24 @@ findings:
     title: "The device-twin and postgres TLS listeners are never live-asserted"
 open: 10
 total: 10
-recorded: 2026-09-29T14:54:53.150Z
+unparsed: 5
+recorded: 2026-09-29T16:04:44.162Z
 ---
 
 # Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
 | WR-01 | warning | open | - |
 | WR-02 | warning | open | - |
 | WR-03 | warning | open | - |
-| WR-04 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
-| IN-03 | info | open | - |
-| IN-04 | info | open | - |
-| IN-05 | info | open | - |
+| CR-01 | critical | open | - (not in the current review) |
+| WR-04 | warning | open | - (not in the current review) |
+| IN-03 | info | open | - (not in the current review) |
+| IN-04 | info | open | - (not in the current review) |
+| IN-05 | info | open | - (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
