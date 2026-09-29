@@ -44,6 +44,10 @@ MAX_LEAF_SECS=$(( MAX_LEAF_DAYS * 86400 ))
 
 MIN_FREE_GB=8
 
+# Hang guard for a listener that stalls mid-handshake. NOT a retry mechanism:
+# a probe killed by it prints no handshake markers and counts as a failure.
+PROBE_TIMEOUT_SECS=20
+
 # Set ONLY by `--live-only ROW` in main(). Assigned unconditionally so that an
 # inherited environment variable can never narrow the gate's coverage.
 LIVE_ONLY=""
@@ -106,6 +110,50 @@ expand_sans() {
     sans="${sans//\$\{DOMO_HOST\}/$DOMO_HOST}"
     sans="${sans//\$\{DOMO_LAN_IP\}/$DOMO_LAN_IP}"
     echo "$sans" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -
+}
+
+# --- TLS handshake verdicts (G-01-3) -----------------------------------------
+#
+# Never judge a handshake by `openssl s_client`'s exit status. Under TLS 1.3 a
+# server that requires a client certificate (RabbitMQ 8883: verify_peer +
+# fail_if_no_peer_cert) sends its refusal, the certificate_required alert
+# (116), only AFTER the client has finished its handshake. s_client then exits
+# 0 or 1 depending on whether it reads stdin EOF or that alert first: a
+# scheduling race, lost by ~90% of probes on a loaded host. The markers below
+# are printed before that race and are identical in both outcomes.
+#
+# No single line is enough. `Protocol: TLSv1.3` and `Verify return code: 0 (ok)`
+# each also appear for a port that does not speak TLS at all, and
+# `New, TLSv1.3, Cipher is …` appears when the chain was refused (the cipher
+# comes from ServerHello). The client's own `write finished` is reached only
+# after -verify_return_error accepted the chain and the server proved key
+# possession. See .planning/debug/verify-pki-rabbitmq-flake.md.
+#
+# One handshake per call, never repeated; no client certificate or key is
+# presented (D-13). `-state` goes to stderr, the summary to stdout: both are
+# captured. Here-strings, not pipes, so `pipefail` plus an early-exiting
+# `grep -q` can never turn a match into a false negative.
+
+# Does ADDR speak TLS at all? True iff the server's certificate was read.
+tls_answers() {
+    local addr="$1"; shift
+    local out
+    out="$(timeout "$PROBE_TIMEOUT_SECS" openssl s_client -state -connect "$addr" "$@" \
+        </dev/null 2>&1 || true)"
+    grep -qxF 'SSL_connect:SSLv3/TLS read server certificate' <<<"$out"
+}
+
+# Did a TLS 1.3 handshake with ADDR complete against CAFILE? True iff the
+# client wrote its Finished, a TLS 1.3 session was established, and the chain
+# verified.
+tls_handshake_verified() {
+    local addr="$1" cafile="$2"; shift 2
+    local out
+    out="$(timeout "$PROBE_TIMEOUT_SECS" openssl s_client -state -connect "$addr" "$@" \
+        -CAfile "$cafile" -verify_return_error -tls1_3 </dev/null 2>&1 || true)"
+    grep -qxF 'SSL_connect:SSLv3/TLS write finished' <<<"$out" \
+        && grep -q '^New, TLSv1\.3, Cipher is ' <<<"$out" \
+        && grep -qxF 'Verify return code: 0 (ok)' <<<"$out"
 }
 
 # --- 1. the organization root ------------------------------------------------
@@ -355,7 +403,7 @@ verify_live() {
             *DNS:*) probe_sni=(-servername "$first_dns") ;;
         esac
         for addr in $endpoints; do
-            if openssl s_client -connect "$addr" "${probe_sni[@]}" </dev/null >/dev/null 2>&1; then
+            if tls_answers "$addr" "${probe_sni[@]}"; then
                 tls_addrs="${tls_addrs} ${addr}"
             fi
         done
@@ -378,9 +426,7 @@ verify_live() {
             esac
             verified=0
             for addr in $tls_addrs; do
-                if openssl s_client -connect "$addr" "${sni[@]}" \
-                        -CAfile "${PKI_DIR}/root.pem" -verify_return_error -tls1_3 \
-                        </dev/null >/dev/null 2>&1; then
+                if tls_handshake_verified "$addr" "${PKI_DIR}/root.pem" "${sni[@]}"; then
                     verified=1
                     ok "${name}  TLS 1.3 verified for ${host_name} on ${addr}"
                     break

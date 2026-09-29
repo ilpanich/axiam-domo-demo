@@ -28,12 +28,11 @@ pki:
 verify-pki:
     @set -a; if [ -f .env ]; then . ./.env; fi; set +a; scripts/verify-pki.sh
 
-# The G-01-3 regression guard: one row's live handshakes, repeated under
-# bounded CPU contention. It must show zero failures and zero skips.
-#
 # Deliberately outside `just verify` and `just phase-verify`: it saturates every
 # core for a minute or two. Each hog runs under `timeout` and is killed on
 # exit. It never retries: every iteration counts.
+#
+# The G-01-3 regression guard: one row's live handshakes under CPU contention.
 verify-pki-stress $row="rabbitmq" $iterations="50":
     #!/usr/bin/env bash
     set -uo pipefail
@@ -66,6 +65,35 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
         exit 1
     fi
     echo "  ✓ idle precondition  ${want} name(s) verified"
+
+    # Negative controls, before any load. Each subshell sources the script, so
+    # it calls the REAL predicates; a vacuous one must never yield a green run.
+    # They are rabbitmq-specific because rabbitmq is the listener under test.
+    tls_ep="$(docker compose -f deploy/compose.yml port rabbitmq 8883 2>/dev/null)"
+    http_ep="$(docker compose -f deploy/compose.yml port rabbitmq 15672 2>/dev/null)"
+    if [ -z "$tls_ep" ] || [ -z "$http_ep" ]; then
+        echo "✗ verify-pki-stress  rabbitmq publishes no 8883 or no 15672 endpoint (got '${tls_ep}' / '${http_ep}')"; exit 1
+    fi
+    tmp="$(mktemp -d)"
+    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+            -subj /CN=verify-pki-negative-control -keyout "${tmp}/nc.key" -out "${tmp}/nc.pem" >/dev/null 2>&1; then
+        echo "✗ verify-pki-stress  could not generate the throwaway CA"; exit 1
+    fi
+    control() { # control LABEL WANT(0|nonzero) FUNCTION ARGS…
+        local label="$1" want="$2" rc; shift 2
+        ( source scripts/verify-pki.sh; "$@" ) >/dev/null 2>&1; rc=$?
+        if { [ "$want" = 0 ] && [ "$rc" -eq 0 ]; } || { [ "$want" != 0 ] && [ "$rc" -ne 0 ]; }; then
+            echo "  ✓ ${label}"
+        else
+            echo "✗ verify-pki-stress  negative control failed: ${label} (exit ${rc})"; exit 1
+        fi
+    }
+    control "NC1 tls_answers refuses plain HTTP on ${http_ep}" nonzero \
+        tls_answers "$http_ep"
+    control "NC2 tls_handshake_verified refuses a throwaway CA on ${tls_ep}" nonzero \
+        tls_handshake_verified "$tls_ep" "${tmp}/nc.pem" -servername rabbitmq
+    control "NC3 tls_handshake_verified accepts the organization root on ${tls_ep}" 0 \
+        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem -servername rabbitmq
 
     # Load: 2 × nproc busy loops, each bounded by `timeout`.
     n=$(( 2 * $(nproc) ))
