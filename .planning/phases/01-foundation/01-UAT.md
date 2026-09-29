@@ -1,5 +1,5 @@
 ---
-status: complete
+status: diagnosed
 phase: 01-foundation
 source: [01-01-SUMMARY.md, 01-02-SUMMARY.md, 01-03-SUMMARY.md, 01-04-SUMMARY.md, 01-05-SUMMARY.md, 01-06-SUMMARY.md, 01-07-SUMMARY.md]
 started: 2026-09-29T11:02:37Z
@@ -30,7 +30,7 @@ covers: 01-07 D8, 01-07 D7, 01-07 D6, 01-02 D10, 01-03 D12, 01-05 D14, 01-04 D2
 expected: `just verify` ends with `✓ verify`. Output shows named groups for PKI, edge, database, authorization and the Twin backend, plus the secrets guard, findings audit and operator-docs drift check. verify-pki asserts 14 TLS 1.3 rows (caddy asserts, does not skip); edge-verify shows `/.well-known/openid-configuration` and `/oauth2/jwks` → 200 with issuer `https://domo.local`, and `/api/twin/healthz → 200 from the Device Twin`.
 result: issue
 reported: "(claude-run) First `just verify`, run right after a `just up` that recreated the containers, failed SC2 verify-pki: `✗ rabbitmq  no published TLS listener verified for rabbitmq against .secrets/pki/root.pem (tried: 192.168.144.20:8883)`, even though the no-CA probe handshake had just succeeded on that port. openssl s_client by hand verified OK with TLS 1.3; three `just verify-pki` re-runs and a second full `just verify` were green. The gate is flaky and races the broker's MQTT TLS listener coming up after a container recreate."
-severity: minor
+severity: major
 source: claude-run
 
 ### 4. Both tenants provisioned and the catalog is idempotent
@@ -394,10 +394,23 @@ blocked: 0
 ## Gaps
 
 - gap_id: G-01-3
-  truth: "`just verify` is green on the live stack, including SC2 verify-pki's RabbitMQ 8883 row"
+  truth: "`just verify` is green on the live stack, and SC2 verify-pki actually asserts the RabbitMQ 8883 row on every run"
   status: failed
-  reason: "User reported (delegated run): first `just verify` after `just up` failed `rabbitmq no published TLS listener verified ... (tried: 192.168.144.20:8883)`; passes on re-run. Intermittent, likely a startup race with the MQTT TLS listener."
-  severity: minor
+  reason: "User reported (delegated run): first `just verify` after `just up` failed `rabbitmq no published TLS listener verified ... (tried: 192.168.144.20:8883)`; passes on re-run."
+  severity: major
+  severity_note: "Raised from minor after diagnosis: besides the red flake, a lost reachability probe makes verify-pki SKIP the rabbitmq row and exit 0, and `just verify` hides the skip — a false green in the phase gate."
   test: 3
-  artifacts: []
-  missing: []
+  root_cause: "scripts/verify-pki.sh verify_live() judges both the reachability probe (~l.344) and the verified probe (~l.367-369) by `openssl s_client </dev/null` EXIT STATUS without presenting a client cert. RabbitMQ 8883 enforces verify_peer + fail_if_no_peer_cert over TLS 1.3 only, so the broker sends a fatal certificate_required alert (116) AFTER the client finishes its handshake; s_client exits 0 or 1 depending on whether it reads stdin EOF before the alert arrives. Chain verification is always `Verify return code: 0 (ok)`. Measured: ~1-4% probe failures idle, ~90% under CPU load; caddy :443 and axiam-server :8090 (no client-cert requirement) 400/400 clean. Startup race ruled out."
+  artifacts:
+    - path: "scripts/verify-pki.sh"
+      issue: "verify_live() uses s_client exit status for reachability and verification; racy on an mTLS-required listener, and a lost reachability probe becomes a silent skip with exit 0"
+    - path: "just/verify.just"
+      issue: "group() discards a passing recipe's output, so verify-pki skip lines never surface (contributing)"
+    - path: "deploy/rabbitmq/20-tls.conf"
+      issue: "trigger only (fail_if_no_peer_cert = true, TLS 1.3) — intended posture, must NOT change"
+  missing:
+    - "Make verify_live's verdict independent of the post-handshake alert (judge from s_client output: Verify return code 0 + TLSv1.3; or present a root-chained client cert such as axiam-amqp-client; or treat alert 116 as the expected, positively-asserted refusal)"
+    - "A published port that requires mTLS must never be silently skipped; surface skips in `just verify`"
+    - "No retries as the fix"
+    - "Regression guard: repeat the rabbitmq row under bounded CPU contention, require zero failures and zero skips"
+  debug_session: .planning/debug/verify-pki-rabbitmq-flake.md
