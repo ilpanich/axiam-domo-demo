@@ -117,6 +117,13 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
         "no port answered a TLS handshake" 'tls_answers() { return 1; }'
     branch "NC6 a name that does not verify fails" \
         "no published TLS listener verified for" 'tls_handshake_verified() { return 1; }'
+    # NC10: the REAL predicate at the REAL call site (CR-01), unlike NC6's mock. The leading DNS:rabbitmq keeps the probe's SNI a real name, so only the identity check can fail.
+    branch "NC10 verify_live fails a row naming a DNS name its served certificate does not carry" \
+        "no published TLS listener verified for not-a-san.invalid" \
+        'expand_sans() { echo "DNS:rabbitmq,DNS:not-a-san.invalid"; }'
+    branch "NC10 verify_live fails a row naming an IP its served certificate does not carry" \
+        "no published TLS listener verified for 10.9.9.9" \
+        'expand_sans() { echo "DNS:rabbitmq,IP:10.9.9.9"; }'
     control "NC7 --live-only refuses an unknown row" nonzero \
         scripts/verify-pki.sh --live-only no-such-row
     control "NC7 --live-only refuses a client row" nonzero \
