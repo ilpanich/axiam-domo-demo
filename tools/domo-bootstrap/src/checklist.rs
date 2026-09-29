@@ -199,11 +199,26 @@ pub fn demo_card(host: &str, fingerprint: &str) -> Result<()> {
 
   just checklist     where this machine stands, stage by stage
   just verify        the fast gate: build, tests, PKI, edge, database, authz
-  just smoke         the live authorization and device-connect suite
+  just smoke-gate    the live authorization and device-connect suite, attributed
   just demo-reset    wipe and rebuild everything except the root, between runs
 
   If {host} does not resolve on the machine you are presenting from, publish
   it (avahi-publish, or /etc/hosts) — `just preflight` prints the command.
+
+## One expected failure, so it does not surprise you on stage
+
+  `just smoke` FAILS two of twelve cases, on purpose. Both are confirmed defects
+  in AXIAM itself, not in this demo:
+
+    cross-tenant-ca-issuance   DF-017   AXIAM signs a leaf under another
+                                        tenant's signing CA
+    other-tenant-ca            DF-025   that leaf then connects end to end
+
+  Together: certificate issuance is not a tenant boundary on the pinned build.
+  AXIAM 1.0.0-beta17 fixes the cause (T22.1); that fix is NOT verified here,
+  because the beta17 images were never published. Run `just smoke-gate` rather
+  than `just smoke` — same suite, but it says which failures are these two and
+  which would be news. Full story: docs/dogfooding-upstream-status.md.
 
 ## Seeded users
 
