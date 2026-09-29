@@ -53,15 +53,16 @@ DOMO_HOST="${DOMO_HOST:-domo.local}"
 #   443    Caddy, the single browser-facing origin      (LAN + loopback, D-05)
 #   8090   AXIAM's own TLS listener, devices reach it directly (LAN + loopback, D-05)
 #   8883   RabbitMQ MQTTS                               (LAN, D-05)
-#   15672  RabbitMQ's management API                    (loopback only)
+#   15673  RabbitMQ's management API, host side          (loopback only)
 #
-# 15672 was missing until plan 01-07, and its absence was not theoretical: the
-# SIBLING AXIAM checkout's own development stack publishes 15672 on 0.0.0.0,
-# which occupies our loopback bind too. Preflight passed, `just up` then died
-# inside `docker compose up` with a bind error — precisely the "fails halfway"
-# this script exists to prevent. A loopback-only publication is still a
-# publication.
-PUBLISHED_PORTS="443 8090 8883 15672"
+# The management port was missing until plan 01-07, and its absence was not
+# theoretical: the SIBLING AXIAM checkout's own development stack publishes 15672
+# on 0.0.0.0, which occupied our loopback bind too. Preflight passed, `just up`
+# then died inside `docker compose up` with a bind error — precisely the "fails
+# halfway" this script exists to prevent. A loopback-only publication is still a
+# publication. The demo now publishes the console on host port 15673 (the
+# container port is unchanged) so the two stacks coexist permanently.
+PUBLISHED_PORTS="443 8090 8883 15673"
 
 fail_count=0
 

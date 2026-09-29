@@ -90,7 +90,7 @@ refusal.
 | `only NG free on /home, need 8G` | The disk floor. This machine has run out of space mid-session before, and the resulting errors look like compiler bugs rather than a full disk. | Reclaim space. `cargo clean`, `docker builder prune -f`, `docker image prune -f`. Never prune volumes — the sibling AXIAM checkout's volumes hold development data. |
 | `docker is not on PATH` / `the Docker daemon is not reachable` | Docker is missing or not running. | Install it, or `systemctl start docker`; add yourself to the `docker` group. |
 | `docker compose is not available as a v2 plugin` | The old `docker-compose` script is not enough. | Install the compose v2 plugin. |
-| `port 443 / 8090 / 8883 / 15672 is already in use` | A bind that would fail inside `docker compose up`. The refusal names the container holding it. | If it is a previous run of this demo, `just down`. If it names an `axiam-*` container, that is the **sibling AXIAM checkout's** own stack — stop it from *that* repository, and do not `docker stop` it blindly: its volumes are not yours to touch. See Troubleshooting. |
+| `port 443 / 8090 / 8883 / 15673 is already in use` | A bind that would fail inside `docker compose up`. The refusal names the container holding it. | If it is a previous run of this demo, `just down`. If it names an `axiam-*` container, that is the **sibling AXIAM checkout's** own stack — stop it from *that* repository, and do not `docker stop` it blindly: its volumes are not yours to touch. See Troubleshooting. |
 | `<host> does NOT resolve here` | A note, not a refusal. The stack still comes up and `just edge-verify` pins the name to `DOMO_LAN_IP`. | Publish the name if a browser on another machine has to reach the demo. The command is printed. |
 
 Preflight deliberately does **not** check memory or swap. Pi memory behaviour is
@@ -343,21 +343,29 @@ fixed: it looks correct on the laptop and fails only on the Pi.
 Every entry below is something this phase actually hit. They are ordered by how
 likely you are to meet them on a first run.
 
-### `docker compose up` dies with a bind error on port 15672
+### `docker compose up` dies with a bind error on a published port
 
-Something else already publishes RabbitMQ's management port. On a developer
+Something else already publishes one of the demo's host ports. On a developer
 machine the likeliest culprit is the **sibling AXIAM checkout's own development
-stack** (`axiam-rabbitmq`), which publishes `15672` on `0.0.0.0` — which occupies
-this demo's loopback bind too.
+stack** (`axiam-rabbitmq`, `axiam-surrealdb`), which publishes 15672, 5671 and
+8000 on `0.0.0.0`.
+
+The demo already sidesteps the one that collided: it publishes the RabbitMQ
+management console on host port **15673**, not the RabbitMQ default 15672, so the
+two stacks coexist on one machine. The console is at `http://127.0.0.1:15673/`.
+Only the host side moved — inside the compose network the broker is still reached
+as `rabbitmq:15672`.
+
+If a bind still fails:
 
 ```bash
-ss -ltnp | grep 15672
-docker ps --format '{{.Names}}\t{{.Ports}}' | grep 15672
+ss -ltnp | grep -E ':(443|8090|8883|15673)\b'
+docker ps --format '{{.Names}}\t{{.Ports}}'
 ```
 
-Stop that stack **from its own repository**. Do not `docker stop` it blindly and
-never prune its volumes: they hold development data that is not this demo's to
-destroy.
+If the holder is the sibling stack, stop it **from its own repository**. Do not
+`docker stop` it blindly and never prune its volumes: they hold development data
+that is not this demo's to destroy.
 
 `just preflight` catches this before anything starts and names the container
 holding the port. It did not always — the port list covered only the three

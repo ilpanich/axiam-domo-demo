@@ -313,7 +313,9 @@ services:
       - "${DOMO_LAN_IP:?operator must set DOMO_LAN_IP - see .env.example}:8883:8883"
       # Management API on the loopback only — operator tooling and the
       # acceptance gate's `GET /api/connections` check.
-      - "127.0.0.1:15672:15672"
+      # Host port 15673, not 15672: the sibling AXIAM development stack publishes 15672 on the same machine.
+      # Only the HOST side moves — in-network callers still reach `rabbitmq:15672`.
+      - "127.0.0.1:15673:15672"
     environment:
       # Applied only on the FIRST boot of an empty rabbitmq-data volume, which
       # is why they are persisted in .secrets/generated.env rather than
