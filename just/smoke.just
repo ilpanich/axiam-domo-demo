@@ -62,7 +62,11 @@ smoke-certs:
 
 # The positive and negative connect matrix: one line per case, exiting non-zero
 # if any observed outcome differs from its expectation.
-smoke-matrix: smoke-certs
+#
+# `_containers-fresh` first, because the matrix is only as meaningful as the
+# Twin it runs against: plan 01-06's matrix ran against a Twin container still
+# on the 01-01 tracer image, and so never met the strict request forms at all.
+smoke-matrix: _containers-fresh smoke-certs
     @just _probe matrix
 
 # --- the whole suite ----------------------------------------------------------

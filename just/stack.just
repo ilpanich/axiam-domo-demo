@@ -567,6 +567,10 @@ up:
     }
 
     do_verify() {
+      # `verify` always runs, even on a converged machine that skipped every
+      # stage that would have recreated a container — so this is the one place
+      # in `up` guaranteed to catch a service still running a superseded image.
+      just _containers-fresh || return 1
       just _stage authz-verify || return 1
       just demo-card
     }
@@ -748,6 +752,35 @@ _images-fresh:
         fi; \
     done; \
     if [ "$stale" -eq 1 ]; then just build; else echo "  ✓ images match the source"; fi
+
+# Recreate any running container whose image is not the one its tag now names.
+#
+# `_images-fresh` is half of the stale-binary trap. This is the other half: a
+# fresh IMAGE is not a fresh CONTAINER. Rebuilding `domo-twin:dev` does not
+# touch the Twin that is already running, and a converged `just up` skips the
+# stages that would recreate it. That is exactly how plan 01-06's whole live
+# matrix ran against the 01-01 tracer's Twin (image 028b0a1434f6, built before
+# 01-05's strict request forms existed), and why the hardened Twin met a real
+# broker for the first time in plan 01-07 and failed on the first request.
+#
+# Generic over every running service, not just ours: each container's image is
+# compared with what its own configured reference resolves to now. Only a
+# mismatch is acted on, one service at a time, `--no-deps` so nothing else moves.
+_containers-fresh: _images-fresh
+    @n=0; \
+    for c in $(just _dc ps -q 2>/dev/null); do \
+        oneoff=$(docker inspect --format '{{"{{"}}index .Config.Labels "com.docker.compose.oneoff"{{"}}"}}' "$c" 2>/dev/null) || continue; \
+        [ "$oneoff" = "True" ] && continue; \
+        ref=$(docker inspect --format '{{"{{"}}.Config.Image{{"}}"}}' "$c" 2>/dev/null) || continue; \
+        cur=$(docker inspect --format '{{"{{"}}.Image{{"}}"}}' "$c" 2>/dev/null) || continue; \
+        want=$(docker image inspect --format '{{"{{"}}.Id{{"}}"}}' "$ref" 2>/dev/null || true); \
+        [ -n "$want" ] && [ "$cur" != "$want" ] || continue; \
+        svc=$(docker inspect --format '{{"{{"}}index .Config.Labels "com.docker.compose.service"{{"}}"}}' "$c"); \
+        echo "  … ${svc} is running ${cur:7:12}, but ${ref} is now ${want:7:12} — recreating it"; \
+        just _dc up -d --no-deps "$svc" >/dev/null 2>&1 || { echo "  ✗ could not recreate ${svc}"; exit 1; }; \
+        n=$((n+1)); \
+    done; \
+    [ "$n" -eq 0 ] && echo "  ✓ every running container runs the image its tag names" || echo "  ✓ recreated ${n} stale container(s)"
 
 # --- the tracer --------------------------------------------------------------
 

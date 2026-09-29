@@ -226,7 +226,21 @@ verify:
       m="$(stat -c '%a' .secrets/demo-card.txt)"
       [ "$m" = 600 ] || { bad "SC1  demo card mode is ${m}, not 600 — it holds the super-admin login (T-07-04)"; sc=1; }
     fi
-    [ "$sc" -eq 0 ] && ok "SC1  every stage marker present, demo card written at 0600 with all five fields"
+    # A fresh IMAGE is not a fresh CONTAINER. Every assertion below is only as
+    # good as the binaries actually running, so a service still on a superseded
+    # image fails the gate here rather than silently validating old code. Read
+    # only — the gate reports, `just _containers-fresh` repairs.
+    for c in $(just _dc ps -q 2>/dev/null); do
+      [ "$(docker inspect --format '{{"{{"}}index .Config.Labels "com.docker.compose.oneoff"{{"}}"}}' "$c" 2>/dev/null)" = True ] && continue
+      ref="$(docker inspect --format '{{"{{"}}.Config.Image{{"}}"}}' "$c" 2>/dev/null)" || continue
+      cur="$(docker inspect --format '{{"{{"}}.Image{{"}}"}}' "$c" 2>/dev/null)" || continue
+      want="$(docker image inspect --format '{{"{{"}}.Id{{"}}"}}' "$ref" 2>/dev/null)" || continue
+      if [ "$cur" != "$want" ]; then
+        bad "SC1  $(docker inspect --format '{{"{{"}}index .Config.Labels "com.docker.compose.service"{{"}}"}}' "$c") is running ${cur:7:12}, not ${ref} (${want:7:12}) — run 'just _containers-fresh'"
+        sc=1
+      fi
+    done
+    [ "$sc" -eq 0 ] && ok "SC1  every stage marker present, every running container on its current image, demo card at 0600 with all five fields"
     note "SC1  the reset half — two consecutive green cycles across a real 'just demo-reset' — is 'just phase-verify'"
 
     # --- SC2 -----------------------------------------------------------------

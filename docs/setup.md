@@ -386,6 +386,26 @@ rebuilds when the image is older than anything under `crates/`, `tools/`,
 `services/`, `Cargo.toml`, `Cargo.lock` or the Dockerfile. If you invoke a `just`
 recipe that runs a tool directly, without going through `just up`, rebuild first.
 
+### A fix is in the source and the image, and the running service still behaves the old way
+
+**A fresh image is not a fresh container.** Rebuilding `domo-twin:dev` does not
+touch the Twin that is already running, and a `just up` on a converged machine
+skips the stages that would recreate it. This is the same stale-binary trap as
+above, one layer out, and it is not hypothetical: plan 01-06's entire live
+device-connect matrix ran against a Twin container still on the 01-01 tracer's
+image (`028b0a1434f6`), built before the Twin's strict request forms existed. The
+hardened Twin first met a real broker in plan 01-07 and refused every device on
+the first request.
+
+```bash
+just _containers-fresh   # recreates any service whose image its tag no longer names
+```
+
+It runs on its own inside `just up`'s `verify` stage (which runs even on a
+converged machine) and before every `just smoke-matrix`. `just verify` reports a
+stale container as a failing `SC1` line rather than repairing it — a gate
+reports, it does not fix.
+
 ### The organization bootstrap fails and the output says `reset required`
 
 AXIAM emits its one-time setup token **once per SurrealDB volume** (DF-019). If
