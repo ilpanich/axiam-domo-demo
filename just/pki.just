@@ -162,12 +162,12 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
         printf '%s\n' "$3" | sed 's/^/      /'
         echo "✗ verify-pki-stress  negative control failed: ${1} (exit ${2})"; exit 1
     }
-    label='NC13 a compose answer that succeeds with no containers is still "stack down"'
+    label="NC13 a compose answer that succeeds with no containers is still \"stack down\""
     out="$( source scripts/verify-pki.sh; docker() { :; }; LIVE_ONLY=""; verify_live 2>&1 )"; rc=$?
     if [ "$rc" -eq 0 ] && grep -qF '→ skipped (stack down)' <<<"$out"; then echo "  ✓ ${label}"; else nc_fail "$label" "$rc" "$out"; fi
-    branch 'NC11 a compose failure is not "stack down"' "docker compose ps failed" \
+    branch "NC11 a compose failure is not \"stack down\"" "docker compose ps failed" \
         'docker() { echo "simulated compose failure" >&2; return 1; }'
-    label='NC11 verify-pki run without COMPOSE_PROJECT_NAME fails, never "stack down" (WR-01)'
+    label="NC11 verify-pki run without COMPOSE_PROJECT_NAME fails, never \"stack down\" (WR-01)"
     out="$(env -i PATH="$PATH" HOME="$HOME" DOMO_HOST="${DOMO_HOST:-}" DOMO_LAN_IP="${DOMO_LAN_IP:-}" bash scripts/verify-pki.sh 2>&1)"; rc=$?
     if [ "$rc" -ne 0 ] && grep -qF 'docker compose ps failed' <<<"$out" \
         && grep -qF 'COMPOSE_PROJECT_NAME is missing a value' <<<"$out" \
@@ -177,7 +177,7 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
     else
         nc_fail "$label" "$rc" "$out"
     fi
-    branch 'NC12 a compose failure while reading published ports is not "no published port" (WR-02)' \
+    branch "NC12 a compose failure while reading published ports is not \"no published port\" (WR-02)" \
         "docker compose ps failed" \
         'docker() { case " $* " in *" --format "*) echo "simulated compose failure" >&2; return 1 ;; esac; command docker "$@"; }'
 

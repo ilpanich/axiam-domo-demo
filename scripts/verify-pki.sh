@@ -2,15 +2,11 @@
 #
 # Whole-chain PKI assertion suite for the AXIAM Domo Demo (PKI-01, PKI-04).
 #
-# The tracer in plan 01-01 proved that ONE chain works. This suite asserts that
-# EVERY chain is correct: the right algorithm, the right extensions, the right
-# SANs, inside the browser lifetime cap, anchored in the one offline root.
-#
-# It is driven by `deploy/pki/listeners.conf` — the same table `gen-pki.sh`
-# issues from — rather than by a hardcoded list of listener names. A listener
-# added by a later plan is therefore both issued AND verified with no edit here.
-# A row whose leaf is missing is a hard failure naming that row, never a silent
-# pass.
+# Plan 01-01's tracer proved ONE chain works; this suite asserts EVERY chain is
+# correct: algorithm, extensions, SANs, the browser lifetime cap, the anchor in
+# the one offline root. It is driven by `deploy/pki/listeners.conf` (the table
+# `gen-pki.sh` issues from, not a hardcoded list), so a listener added later is
+# issued AND verified with no edit here; a missing leaf fails, naming its row.
 #
 # Usage: scripts/verify-pki.sh                  (normally: `just verify-pki`)
 #        scripts/verify-pki.sh --live-only ROW  (only the live handshakes of one
@@ -20,6 +16,9 @@
 # Env:   DOMO_HOST (default: domo.local), DOMO_LAN_IP (default: 127.0.0.1)
 #        — must match the values `gen-pki.sh` issued with, or the SAN
 #          comparison will correctly report the certificates as stale.
+#        COMPOSE_PROJECT_NAME — required whenever docker is on PATH; `just
+#          verify-pki` loads it from .env. A direct run without it fails
+#          rather than guessing the project.
 #
 # Exit: 0 when every assertion passes; non-zero on the FIRST failure, with the
 #       listener and the failing property named.
@@ -345,12 +344,17 @@ verify_tenant_cas() {
 # FAILURE, never a skip (G-01-3): its service not running, no port answering a
 # TLS handshake, a name that does not verify, or nothing checked at all. A
 # skipped row once let the phase gate report assurance it never produced. The
-# only per-row skip left is a running service that publishes no port.
+# only per-row skip left is a running service that publishes no port. A compose
+# failure is a failure too, never "stack down" or "no published port" (WR-01/02).
 
 # Compose exits 0 with empty output for a stopped or unknown service, so the
-# output is the verdict, not the status.
+# output is the verdict only when compose succeeded. A non-zero exit is a
+# compose failure that ends the run (WR-01): never call this in a substitution.
 service_running() {
-    [ -n "$(docker compose -f "$COMPOSE_FILE" ps -q "$1" 2>/dev/null)" ]
+    local ids
+    ids="$(docker compose -f "$COMPOSE_FILE" ps -q "$1")" \
+        || fail "${1}  docker compose ps failed, so whether ${1} is running is unknown; a compose error is not a stopped stack (export COMPOSE_PROJECT_NAME, or run 'just verify-pki')"
+    [ -n "$ids" ]
 }
 
 # "Up" means at least one listener service (a `server` row) is running. Any
@@ -369,12 +373,13 @@ stack_is_up() {
 
 # One `host:port` per published port, sorted and unique. docker and openssl are
 # the only live-check dependencies: no optional JSON tool whose absence used to
-# skip every row.
+# skip every row. Returns 1 on a compose failure, which its caller fails (WR-02).
 published_endpoints() {
-    docker compose -f "$COMPOSE_FILE" ps --format \
+    local raw
+    raw="$(docker compose -f "$COMPOSE_FILE" ps --format \
         '{{range .Publishers}}{{if .PublishedPort}}{{.URL}}:{{.PublishedPort}} {{end}}{{end}}' \
-        "$1" 2>/dev/null \
-        | tr ' ' '\n' \
+        "$1")" || return 1
+    printf '%s' "$raw" | tr ' ' '\n' \
         | sed 's/^0\.0\.0\.0:/127.0.0.1:/; s/^\[::\]:/127.0.0.1:/; s/^:::/127.0.0.1:/; s/^:/127.0.0.1:/; /^$/d' \
         | sort -u
 }
@@ -404,7 +409,8 @@ verify_live() {
             || fail "${name}  the stack is up but ${name} is not running, so its listener cannot be asserted — run 'just up'"
 
         local endpoints
-        endpoints="$(published_endpoints "$name" || true)"
+        endpoints="$(published_endpoints "$name")" \
+            || fail "${name}  docker compose ps failed while reading its published ports; a compose error is not an unpublished row"
         if [ -z "$endpoints" ]; then
             skip "${name}: no published port"
             continue
