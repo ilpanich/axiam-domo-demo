@@ -6,7 +6,7 @@ status: executing
 stopped_at: Completed 01-09-PLAN.md
 last_updated: "2026-09-29T15:57:33.002Z"
 last_activity: 2026-09-29
-last_activity_desc: Phase 01 execution started
+last_activity_desc: 01-09 completed — CR-01, WR-01, WR-02 closed, all 9 plans executed
 state_head: 7cc98d8decef0e8a729e391bd9d37a0cb3d86c14
 progress:
   total_phases: 6
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 01 (Foundation) — EXECUTING
-Plan: 2 of 9
-Status: Ready to execute
-Last activity: 2026-09-29 — Phase 01 execution started
+Plan: 9 of 9 (every plan has a SUMMARY; 01-09 closed verification gaps CR-01, WR-01, WR-02)
+Status: Ready for re-verification — `/gsd-verify-work 01`. `just verify` is green on the live stack; `just smoke` stays known-red by explicit decision (DF-017, DF-025)
+Last activity: 2026-09-29 — 01-09 completed; verify-pki identity-checks every declared name/IP and fails on a compose error instead of skipping
 
 Progress: [░░░░░░░░░░] 0%
 
