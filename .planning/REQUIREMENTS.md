@@ -16,10 +16,10 @@
 
 ### PKI & Trust (PKI)
 
-- [ ] **PKI-01**: Setup generates the organization root. AXIAM imports it with its key (BYOK), and it is the only trust anchor in the demo.
+- [x] **PKI-01**: Setup generates the organization root. AXIAM imports it with its key (BYOK), and it is the only trust anchor in the demo.
 - [ ] **PKI-02**: AXIAM issues one tenant signing CA (intermediate) per tenant under the imported root.
 - [ ] **PKI-03**: Every device and service client certificate is issued by AXIAM from the owning tenant's signing CA.
-- [ ] **PKI-04**: Every server certificate (Caddy, AXIAM, RabbitMQ, PostgreSQL, Management Platform, Twin) carries correct SANs and is signed by the same root at setup. Chromium and Firefox trust the portals without warnings once the root is imported.
+- [x] **PKI-04**: Every server certificate (Caddy, AXIAM, RabbitMQ, PostgreSQL, Management Platform, Twin) carries correct SANs and is signed by the same root at setup. Chromium and Firefox trust the portals without warnings once the root is imported.
 - [x] **PKI-05**: Operator can export the root and follow documented steps to trust it on the presenting machine (browser and OS) and on the simulator PC.
 - [ ] **PKI-06**: The root private key lives only in a setup-owned secrets directory that is git-ignored and never baked into images.
 
@@ -203,10 +203,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-04 | Phase 4 | Pending |
 | PLAT-05 | Phase 1 | Complete |
 | PLAT-06 | Phase 1 | Complete |
-| PKI-01 | Phase 1 | Pending |
+| PKI-01 | Phase 1 | Complete |
 | PKI-02 | Phase 1 | Pending |
 | PKI-03 | Phase 1 | Pending |
-| PKI-04 | Phase 1 | Pending |
+| PKI-04 | Phase 1 | Complete |
 | PKI-05 | Phase 1 | Complete |
 | PKI-06 | Phase 1 | Pending |
 | AUTH-01 | Phase 5 | Pending |

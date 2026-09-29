@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Foundation
 status: executing
-stopped_at: Completed 01-07-PLAN.md — Phase 1 complete, phase gate known-red by user decision
-last_updated: "2026-09-29T10:30:26.566Z"
+stopped_at: Completed 01-08-PLAN.md
+last_updated: "2026-09-29T14:46:09.984Z"
 last_activity: 2026-09-29
-last_activity_desc: 01-07 completed — all 7 plans executed, phase gate known-red by user decision
-state_head: 7ae6b2bcf26b54cce7cd6b418e4882e47c389af3
+last_activity_desc: 01-08 completed — G-01-3 closed, all 8 plans executed
+state_head: 9e873b0a027f72ee025d364681748121180da439
 progress:
   total_phases: 6
   completed_phases: 0
-  total_plans: 7
-  completed_plans: 7
+  total_plans: 8
+  completed_plans: 8
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 01 (Foundation) — ALL PLANS EXECUTED, awaiting phase verification
-Plan: 7 of 7 (every plan has a SUMMARY)
-Status: Ready for verification — `/gsd-verify-work 01`. The phase gate (`just phase-verify`) is known-red by explicit user decision: only DF-017/DF-025, fixed upstream in AXIAM beta17 (T22.1) but unverified here. Human checks pending: browser trust (RESEARCH A7), docs/setup.md on a fresh machine, the Raspberry Pi run (user_setup).
-Last activity: 2026-09-29 — 01-07 completed; phase gate run twice around two resets, known-red, root unchanged
+Plan: 8 of 8 (every plan has a SUMMARY; 01-08 closed UAT gap G-01-3)
+Status: Ready for verification — `/gsd-verify-work 01`. `just verify` is green on the live stack; the phase gate (`just phase-verify`) stays known-red by explicit user decision on DF-017/DF-025 only.
+Last activity: 2026-09-29 — 01-08 completed; verify-pki judges handshakes by markers, never skips a published row, and `just verify` surfaces skips
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P07 | ~65 min (this session; tasks 1-2 on 2026-09-21) | 3 tasks | 48 files |
+| Phase 01 P08 | 11min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-07: the Twin admits the broker's client_id on /rmq/vhost and /rmq/resource by name and holds it to the CN=<username> binding; deny_unknown_fields otherwise unchanged
 - [Phase 01]: 01-07: just phase-verify exits non-zero by user decision until the DF-017 upstream fix (beta17 T22.1) is verified here; smoke-gate attributes the pair and flags any third failure as a regression
 - [Phase 01]: 01-07: plan 01-06's live matrix is invalidated as evidence about the hardened Twin (it ran on the 01-01 tracer image 028b0a1434f6); 01-07's 10/2 is the first valid run; _containers-fresh now prevents a container outliving its image
+- [Phase 01]: G-01-3 fixed by construction: TLS verdicts come from s_client -state/summary markers, never its exit status; no retries, no client cert
+- [Phase 01]: While the stack is up, verify-pki fails (never skips) a published server row it cannot assert; stack_is_up keyed on listener services
+- [Phase 01]: just verify surfaces skip lines from passing groups; verify-pki-stress stays outside verify/phase-verify
 
 ### Pending Todos
 
@@ -95,6 +99,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T10:30:26.529Z
-Stopped at: Completed 01-07-PLAN.md — Phase 1 complete, phase gate known-red by user decision
+Last session: 2026-09-29T14:46:09.946Z
+Stopped at: Completed 01-08-PLAN.md
 Resume file: None
