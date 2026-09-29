@@ -21,10 +21,13 @@ pki:
 
 # --- verification ------------------------------------------------------------
 
+# Live TLS handshakes are checked too when this compose project is running. The
+# live section is skipped only when the stack is down, and a running service
+# with no published port is skipped by name. Every other way of not asserting a
+# published listener is a failure (G-01-3).
+#
 # Assert every property of every certificate the listener table declares:
 # algorithm, extensions, SANs, lifetime bound, and the chain to the one root.
-# Live TLS handshakes are checked too when this compose project is running, and
-# skipped — not failed — when it is not.
 verify-pki:
     @set -a; if [ -f .env ]; then . ./.env; fi; set +a; scripts/verify-pki.sh
 
@@ -94,6 +97,33 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
         tls_handshake_verified "$tls_ep" "${tmp}/nc.pem" -servername rabbitmq
     control "NC3 tls_handshake_verified accepts the organization root on ${tls_ep}" 0 \
         tls_handshake_verified "$tls_ep" .secrets/pki/root.pem -servername rabbitmq
+
+    # Branch controls: override exactly one function, then every failure branch
+    # of verify_live must FAIL with its own message, and never skip.
+    branch() { # branch LABEL EXPECTED-TEXT OVERRIDE
+        local label="$1" expect="$2" override="$3" out rc
+        out="$( source scripts/verify-pki.sh; LIVE_ONLY=rabbitmq; eval "$override"; verify_live 2>&1 )"; rc=$?
+        if [ "$rc" -ne 0 ] && grep -qF -- "$expect" <<<"$out" && ! grep -qF '→ skipped' <<<"$out"; then
+            echo "  ✓ ${label}"
+        else
+            printf '%s\n' "$out" | sed 's/^/      /'
+            echo "✗ verify-pki-stress  negative control failed: ${label} (exit ${rc})"; exit 1
+        fi
+    }
+    branch "NC4 a listener service that is not running fails" \
+        "✗ rabbitmq  the stack is up but rabbitmq is not running" \
+        'service_running() { [ "$1" != rabbitmq ]; }'
+    branch "NC5 no port answering a TLS handshake fails" \
+        "no port answered a TLS handshake" 'tls_answers() { return 1; }'
+    branch "NC6 a name that does not verify fails" \
+        "no published TLS listener verified for" 'tls_handshake_verified() { return 1; }'
+    control "NC7 --live-only refuses an unknown row" nonzero \
+        scripts/verify-pki.sh --live-only no-such-row
+    control "NC7 --live-only refuses a client row" nonzero \
+        scripts/verify-pki.sh --live-only axiam-amqp-client
+    control "NC8 stack_is_up is true on the live stack" 0 stack_is_up
+    control "NC8 stack_is_up is false when no listener service runs" nonzero \
+        eval 'service_running() { return 1; }; stack_is_up'
 
     # Load: 2 × nproc busy loops, each bounded by `timeout`.
     n=$(( 2 * $(nproc) ))

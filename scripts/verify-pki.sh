@@ -332,31 +332,48 @@ verify_tenant_cas() {
 # Deliberately scoped to this compose project rather than to a raw port probe:
 # a port being open says nothing about WHOSE listener answers it, and asserting
 # our root against a stranger's listener would be a false failure.
-stack_is_up() {
-    command -v docker >/dev/null 2>&1 || return 1
-    docker compose -f "$COMPOSE_FILE" ps -q >/dev/null 2>&1 || return 1
-    [ -n "$(docker compose -f "$COMPOSE_FILE" ps -q 2>/dev/null)" ]
+#
+# While the stack is up, a published server row that could not be asserted is a
+# FAILURE, never a skip (G-01-3): its service not running, no port answering a
+# TLS handshake, a name that does not verify, or nothing checked at all. A
+# skipped row once let the phase gate report assurance it never produced. The
+# only per-row skip left is a running service that publishes no port.
+
+# Compose exits 0 with empty output for a stopped or unknown service, so the
+# output is the verdict, not the status.
+service_running() {
+    [ -n "$(docker compose -f "$COMPOSE_FILE" ps -q "$1" 2>/dev/null)" ]
 }
 
+# "Up" means at least one listener service (a `server` row) is running. Any
+# project container would count a lone tools-profile one-off (domo-bootstrap,
+# domo-probe) as a running stack, and every row would then fail as not running.
+stack_is_up() {
+    command -v docker >/dev/null 2>&1 || return 1
+    local name kind rest
+    while IFS='|' read -r name kind rest; do
+        name="$(echo "$name" | tr -d '[:space:]')"; kind="$(echo "$kind" | tr -d '[:space:]')"
+        case "$name" in ''|\#*) continue ;; esac
+        if [ "$kind" = "server" ] && service_running "$name"; then return 0; fi
+    done < "$LISTENERS"
+    return 1
+}
+
+# One `host:port` per published port, sorted and unique. docker and openssl are
+# the only live-check dependencies: no optional JSON tool whose absence used to
+# skip every row.
 published_endpoints() {
-    local service="$1"
-    docker compose -f "$COMPOSE_FILE" ps --format json "$service" 2>/dev/null \
-        | jq -r '(if type=="array" then .[] else . end)
-                 | .Publishers[]?
-                 | select(.PublishedPort > 0)
-                 | "\(if (.URL // "") == "" then "127.0.0.1" else .URL end):\(.PublishedPort)"' 2>/dev/null \
-        | sed 's/^0\.0\.0\.0:/127.0.0.1:/; s/^\[::\]:/127.0.0.1:/' \
+    docker compose -f "$COMPOSE_FILE" ps --format \
+        '{{range .Publishers}}{{if .PublishedPort}}{{.URL}}:{{.PublishedPort}} {{end}}{{end}}' \
+        "$1" 2>/dev/null \
+        | tr ' ' '\n' \
+        | sed 's/^0\.0\.0\.0:/127.0.0.1:/; s/^\[::\]:/127.0.0.1:/; s/^:::/127.0.0.1:/; s/^:/127.0.0.1:/; /^$/d' \
         | sort -u
 }
 
 verify_live() {
     group "live listeners"
 
-    if ! command -v jq >/dev/null 2>&1; then
-        [ -z "$LIVE_ONLY" ] || fail "jq is not on PATH (needed by --live-only ${LIVE_ONLY})"
-        skip "jq is not on PATH"
-        return 0
-    fi
     if ! stack_is_up; then
         [ -z "$LIVE_ONLY" ] || fail "stack down: --live-only ${LIVE_ONLY} asserts a live listener — run 'just up' first"
         skip "stack down"
@@ -375,6 +392,8 @@ verify_live() {
             [ "$name" = "$LIVE_ONLY" ] || continue
             matched=1
         fi
+        service_running "$name" \
+            || fail "${name}  the stack is up but ${name} is not running, so its listener cannot be asserted — run 'just up'"
 
         local endpoints
         endpoints="$(published_endpoints "$name" || true)"
@@ -408,8 +427,7 @@ verify_live() {
             fi
         done
         if [ -z "$tls_addrs" ]; then
-            skip "${name}: published, but no port answered a TLS handshake (probed with SNI ${first_dns:-<none>})"
-            continue
+            fail "${name}  published, but no port answered a TLS handshake (probed with SNI ${first_dns:-<none>}; tried: $(echo $endpoints))"
         fi
 
         # Every declared NAME must verify, so the check cannot depend on that
@@ -442,7 +460,7 @@ verify_live() {
         [ "$matched" -eq 1 ] || fail "--live-only ${LIVE_ONLY}: no server row of that name in ${LISTENERS}"
         [ "$checked" -gt 0 ] || fail "row ${LIVE_ONLY} was not live-verified"
     fi
-    [ "$checked" -gt 0 ] || skip "no published TLS listener to check"
+    [ "$checked" -gt 0 ] || fail "the stack is up but no published TLS listener was live-verified"
 }
 
 # --- main --------------------------------------------------------------------
