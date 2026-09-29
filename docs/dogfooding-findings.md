@@ -33,7 +33,15 @@ workaround the demo uses, and a status.
 exercised here. `resolved` = was open, the runtime answer is now known and
 recorded in place. `design-exception` = not an AXIAM gap, but a documented
 exception to one of the demo's own rules. `proposed-improvement` = a capability
-that does not exist; not a defect.
+that does not exist; not a defect. `fixed-upstream` = AXIAM has shipped a fix in
+a **later** release than the one pinned above; the finding remains true of the
+pinned build and the fix is **not** verified here.
+
+**Upstream status lives in `docs/dogfooding-upstream-status.md`**, not in this
+file. A finding is a fact about the build it was observed on and does not change;
+what AXIAM has since done about it changes every release. Eight entries below are
+`fixed-upstream` as of AXIAM 1.0.0-beta17 — that file says which, as what, and
+what has to be re-run before any of them can be called `resolved`.
 
 ## How this file is audited
 
@@ -65,7 +73,7 @@ headings, so an entry that invents its own layout stops being counted.
 
 ## DF-001 — No SAN, keyUsage or extendedKeyUsage on AXIAM-issued leaves
 
-**Component** axiam-server (`axiam-pki`) · **Severity** high · **Status** reported-from-source-reading · **Build** as pinned above
+**Component** axiam-server (`axiam-pki`) · **Severity** high · **Status** fixed-upstream (beta17 T22.14) · **Build** as pinned above
 
 **Expected vs actual** — A certificate issued from a tenant signing CA should be able to terminate TLS: the CSR's requested `subjectAltName`, `keyUsage` and `extendedKeyUsage` honoured, or passable explicitly. **Actual:** issued leaves carry none of the three, and every current browser rejects a server certificate with no `subjectAltName` — so AXIAM-issued certificates cannot front a listener at all.
 
@@ -129,7 +137,7 @@ gRPC covers `CheckAccess` and token operations but no management surface, so any
 
 ## DF-005 — gRPC listener performs no client-certificate verification
 
-**Component** axiam-server · **Severity** high · **Status** reported-from-source-reading · **Build** as pinned above
+**Component** axiam-server · **Severity** high · **Status** fixed-upstream (beta17 T22.12) · **Build** as pinned above
 
 **Expected vs actual** — The gRPC listener should be able to require and verify a client certificate, so a service can be authenticated by mTLS the way a device is on REST. **Actual:** only `AXIAM__SERVER__TLS__*` is documented for the gRPC port and there is no client-certificate verification setting, so callers are authenticated by bearer token alone.
 
@@ -257,7 +265,7 @@ The management manifest is the natural way to declare an authorization model, an
 
 ## DF-013 — REST management routes reject the machine-to-machine audience
 
-**Component** axiam-server · **Severity** high · **Status** reported-from-source-reading · **Build** as pinned above
+**Component** axiam-server · **Severity** high · **Status** fixed-upstream (beta17 T22.13) · **Build** as pinned above
 
 **Expected vs actual** — A service account should be able to manage the objects it is responsible for. **Actual:** every REST management handler takes `AuthenticatedUser`, and the audience check rejects `axiam:m2m` with "audience mismatch — this route requires axiam:user audience". Service accounts can call `POST /authz/check` and nothing else, so a service that manages AXIAM must hold **user** credentials.
 
@@ -273,7 +281,7 @@ All REST management handlers require the `axiam:user` audience, so a token minte
 
 ## DF-014 — Device mTLS tokens carry no certificate-thumbprint confirmation claim
 
-**Component** axiam-server · **Severity** medium · **Status** reported-from-source-reading · **Build** as pinned above
+**Component** axiam-server · **Severity** medium · **Status** fixed-upstream (beta17 T22.3) · **Build** as pinned above
 
 **Expected vs actual** — A token issued in exchange for a client certificate should carry `cnf` / `x5t#S256` (RFC 8705), so a downstream consumer can bind the token to the certificate that obtained it. **Actual:** the device access-token spec sets no confirmation claim, so a stolen token is usable from any TLS session and nothing downstream can prove the presenter is the certificate holder.
 
@@ -321,7 +329,7 @@ The healthcheck client trusts webpki roots only and defaults to plain HTTP, so o
 
 ## DF-017 — Leaf issuance does not bind a tenant signing CA to its tenant
 
-**Component** axiam-server (`axiam-pki`) · **Severity** high · **Status** confirmed · **Build** as pinned above
+**Component** axiam-server (`axiam-pki`) · **Severity** high · **Status** confirmed · fixed-upstream (beta17 T22.1) · **Build** as pinned above
 
 **Expected vs actual** — A tenant administrator should be able to issue leaves only from their **own** tenant's signing CA. **Actual:** `prepare_leaf_issuance` checks that the issuing CA belongs to the organization, is active and in-window; it does **not** check that a *tenant* signing CA belongs to the acting tenant. Confirmed at runtime in plan 01-06: the Lakeside tenant admin signed a certificate request under **Summit's** signing CA and AXIAM returned a certificate.
 
@@ -362,7 +370,7 @@ With `AXIAM__AUTH__SECRET_PROVIDER=env`, the logical key `pki_encryption_key` re
 
 ## DF-019 — The setup token is logged once per database
 
-**Component** axiam-server · **Severity** high · **Status** confirmed · **Build** as pinned above
+**Component** axiam-server · **Severity** high · **Status** confirmed · fixed-upstream (beta17 T22.7) · **Build** as pinned above
 
 **Expected vs actual** — The first-run setup token should be recoverable if it is lost before bootstrap completes. **Actual:** it is minted and logged exactly once per database and later boots are silent no-ops, so if the container is **recreated** — which discards its logs — before org-bootstrap succeeds, the only recovery is wiping the datastore volume.
 
@@ -394,7 +402,7 @@ Not a defect — a documentation request. When RabbitMQ is configured with broke
 
 ## DF-021 — An allow/deny grant cannot be marked non-inheritable
 
-**Component** axiam-server (authorization model) · **Severity** low · **Status** proposed-improvement · **Build** as pinned above
+**Component** axiam-server (authorization model) · **Severity** low · **Status** fixed-upstream (beta17 T22.11) · **Build** as pinned above
 
 **Raised by the user during Phase 1 execution (2026-09-20); not discovered by the tracer.** It is a proposed capability, not an observed defect, and it is recorded here so the log keeps the two apart.
 
@@ -462,7 +470,7 @@ The default 10/min login limit is a sensible interactive default and a poor prov
 
 ## DF-025 — A forged-common-name certificate from another tenant's CA authenticates a device end to end
 
-**Component** axiam-server (`axiam-pki`) + the demo's broker chain · **Severity** high · **Status** confirmed · **Build** as pinned above
+**Component** axiam-server (`axiam-pki`) + the demo's broker chain · **Severity** high · **Status** confirmed · cause fixed-upstream (beta17 T22.1, via DF-017) · **Build** as pinned above
 
 **Expected vs actual** — A certificate signed by tenant B's authority should not be able to speak for a device of tenant A, at any layer. **Actual:** it can, and the connection is fully functional — CONNECT accepted, subscribe acknowledged, publish acknowledged, message delivered.
 
@@ -511,7 +519,7 @@ The console image's nginx configuration names its upstreams directly in `proxy_p
 
 ## DF-027 — An unbound device certificate is refused with 403, not 401
 
-**Component** axiam-server (`POST /api/v1/auth/device`) · **Severity** low · **Status** confirmed · **Build** as pinned above
+**Component** axiam-server (`POST /api/v1/auth/device`) · **Severity** low · **Status** confirmed · fixed-upstream (beta17 T22.4) · **Build** as pinned above
 
 **Expected vs actual** — A certificate that is valid TLS material but bound to no service account "authenticates as nobody", which reads as an authentication failure: 401. **Actual:** AXIAM answers **403**.
 
