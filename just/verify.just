@@ -42,15 +42,18 @@ verify:
     rule() { local t="$*"; local n=$(( 60 - ${#t} )); [ "$n" -lt 1 ] && n=1
              printf '\n── %s %s\n' "$t" "$(printf '─%.0s' $(seq 1 "$n"))"; }
 
-    # Run a contributed recipe as one named group: stream nothing on success
-    # beyond its own name, print its whole output on failure. A green gate that
-    # prints four hundred lines stops being read.
+    # Run a contributed recipe as one named group: on success print its name
+    # and any `→ skipped` lines it printed, on failure its whole output. A green
+    # gate that prints four hundred lines stops being read, but a skipped
+    # assertion is not a passed one: a hidden skip once let the phase gate
+    # report a row it never checked (G-01-3).
     group() {
       local name="$1"; shift
       local out rc
       out="$("$@" 2>&1)"; rc=$?
       if [ "$rc" -eq 0 ]; then
         ok "$name"
+        grep -F '→ skipped' <<<"$out" | sed 's/^[[:space:]]*/      /'
       else
         bad "$name"
         printf '%s\n' "$out" | sed 's/^/      /'
