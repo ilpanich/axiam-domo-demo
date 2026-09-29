@@ -7,20 +7,20 @@
 
 ### Platform & Deployment (PLAT)
 
-- [x] **PLAT-01**: Operator can start the whole platform with one command on the Dell XPS 9570 (amd64, ArchLinux). The platform is AXIAM, PostgreSQL, the Management Platform, the Device Twin, both portals, the sim control page and Caddy.
-- [x] **PLAT-02**: Operator can start the same platform with one command on a Raspberry Pi 5 with 8 GB (arm64, Raspberry Pi OS), using multi-arch images.
+- [ ] **PLAT-01**: Operator can start the whole platform with one command on the Dell XPS 9570 (amd64, ArchLinux). The platform is AXIAM, PostgreSQL, the Management Platform, the Device Twin, both portals, the sim control page and Caddy.
+- [ ] **PLAT-02**: Operator can start the same platform with one command on a Raspberry Pi 5 with 8 GB (arm64, Raspberry Pi OS), using multi-arch images.
 - [ ] **PLAT-03**: The platform's total resident memory stays at or below 4 GB on the Pi with the full demo running (114 devices connected, both portals in use).
 - [ ] **PLAT-04**: Operator can run the three simulator hosts on a Linux x86_64 PC. They connect to a platform on the LAN (Pi) or on the same host (XPS).
-- [x] **PLAT-05**: Operator can wipe and fully rebuild the demo state with `just demo-reset`: PKI, AXIAM tenants/roles/groups, domain data, device certs. The command is idempotent and can be re-run after an interruption.
-- [x] **PLAT-06**: All browser traffic goes through a single HTTPS origin (Caddy), which serves the portals and proxies `/api/mgmt`, `/api/twin` and `/axiam`.
+- [ ] **PLAT-05**: Operator can wipe and fully rebuild the demo state with `just demo-reset`: PKI, AXIAM tenants/roles/groups, domain data, device certs. The command is idempotent and can be re-run after an interruption.
+- [ ] **PLAT-06**: All browser traffic goes through a single HTTPS origin (Caddy), which serves the portals and proxies `/api/mgmt`, `/api/twin` and `/axiam`.
 
 ### PKI & Trust (PKI)
 
-- [x] **PKI-01**: Setup generates the organization root. AXIAM imports it with its key (BYOK), and it is the only trust anchor in the demo.
+- [ ] **PKI-01**: Setup generates the organization root. AXIAM imports it with its key (BYOK), and it is the only trust anchor in the demo.
 - [ ] **PKI-02**: AXIAM issues one tenant signing CA (intermediate) per tenant under the imported root.
 - [ ] **PKI-03**: Every device and service client certificate is issued by AXIAM from the owning tenant's signing CA.
-- [x] **PKI-04**: Every server certificate (Caddy, AXIAM, RabbitMQ, PostgreSQL, Management Platform, Twin) carries correct SANs and is signed by the same root at setup. Chromium and Firefox trust the portals without warnings once the root is imported.
-- [x] **PKI-05**: Operator can export the root and follow documented steps to trust it on the presenting machine (browser and OS) and on the simulator PC.
+- [ ] **PKI-04**: Every server certificate (Caddy, AXIAM, RabbitMQ, PostgreSQL, Management Platform, Twin) carries correct SANs and is signed by the same root at setup. Chromium and Firefox trust the portals without warnings once the root is imported.
+- [ ] **PKI-05**: Operator can export the root and follow documented steps to trust it on the presenting machine (browser and OS) and on the simulator PC.
 - [ ] **PKI-06**: The root private key lives only in a setup-owned secrets directory that is git-ignored and never baked into images.
 
 ### Authentication (AUTH)
@@ -197,17 +197,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |---|---|---|
-| PLAT-01 | Phase 1 | Complete |
-| PLAT-02 | Phase 1 | Complete |
+| PLAT-01 | Phase 1 | Gaps Found |
+| PLAT-02 | Phase 1 | Gaps Found |
 | PLAT-03 | Phase 6 | Pending |
 | PLAT-04 | Phase 4 | Pending |
-| PLAT-05 | Phase 1 | Complete |
-| PLAT-06 | Phase 1 | Complete |
-| PKI-01 | Phase 1 | Complete |
+| PLAT-05 | Phase 1 | Gaps Found |
+| PLAT-06 | Phase 1 | Gaps Found |
+| PKI-01 | Phase 1 | Gaps Found |
 | PKI-02 | Phase 1 | Pending |
 | PKI-03 | Phase 1 | Pending |
-| PKI-04 | Phase 1 | Complete |
-| PKI-05 | Phase 1 | Complete |
+| PKI-04 | Phase 1 | Gaps Found |
+| PKI-05 | Phase 1 | Gaps Found |
 | PKI-06 | Phase 1 | Pending |
 | AUTH-01 | Phase 5 | Pending |
 | AUTH-02 | Phase 5 | Pending |
