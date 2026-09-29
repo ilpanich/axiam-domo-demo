@@ -128,6 +128,8 @@ expand_sans() {
 # comes from ServerHello). The client's own `write finished` is reached only
 # after -verify_return_error accepted the chain and the server proved key
 # possession. See .planning/debug/verify-pki-rabbitmq-flake.md.
+# `-servername` alone only sets SNI and checks no name, which is why the
+# identity is built here and not left to the caller (CR-01).
 #
 # One handshake per call, never repeated; no client certificate or key is
 # presented (D-13). `-state` goes to stderr, the summary to stdout: both are
@@ -143,13 +145,19 @@ tls_answers() {
     grep -qxF 'SSL_connect:SSLv3/TLS read server certificate' <<<"$out"
 }
 
-# Did a TLS 1.3 handshake with ADDR complete against CAFILE? True iff the
-# client wrote its Finished, a TLS 1.3 session was established, and the chain
-# verified.
+# Did a TLS 1.3 handshake with ADDR complete against CAFILE for ENTRY? True iff
+# the client wrote its Finished, a TLS 1.3 session was established, the chain
+# verified, and the certificate covers NAME (the DNS name or IP address ENTRY
+# declares). An ENTRY naming no identity gets no verdict and no handshake.
 tls_handshake_verified() {
-    local addr="$1" cafile="$2"; shift 2
-    local out
-    out="$(timeout "$PROBE_TIMEOUT_SECS" openssl s_client -state -connect "$addr" "$@" \
+    local addr="$1" cafile="$2" entry="${3:-}"
+    local out id=()
+    case "$entry" in
+        DNS:?*) id=(-servername "${entry#DNS:}" -verify_hostname "${entry#DNS:}") ;;
+        IP:?*)  id=(-verify_ip "${entry#IP:}") ;;
+        *)      return 1 ;;
+    esac
+    out="$(timeout "$PROBE_TIMEOUT_SECS" openssl s_client -state -connect "$addr" "${id[@]}" \
         -CAfile "$cafile" -verify_return_error -tls1_3 </dev/null 2>&1 || true)"
     grep -qxF 'SSL_connect:SSLv3/TLS write finished' <<<"$out" \
         && grep -q '^New, TLSv1\.3, Cipher is ' <<<"$out" \
@@ -402,20 +410,13 @@ verify_live() {
             continue
         fi
 
-        # A service may publish more than one port and only some of them speak
-        # TLS (RabbitMQ publishes the plain-HTTP management UI alongside MQTTS).
-        # Narrow to the ports that complete a handshake at all, so a non-TLS
-        # port is never mistaken for a broken TLS listener.
-        #
-        # SNI is REQUIRED here, not optional. Caddy runs with `auto_https off`
-        # and only host-keyed site blocks, so it has no default site and refuses
-        # a handshake that names no server. Without `-servername` this probe
-        # found no TLS port on `caddy` and the row was reported as
-        # "published, but no port answered a TLS handshake" — which reads as a
-        # fault in Caddy rather than a limitation of the probe, and silently
-        # dropped the edge from the suite's coverage (found by plan 01-03).
-        # The first DNS SAN is the row's own name for itself, which is exactly
-        # what a client would send.
+        # First narrow to the ports that speak TLS at all (RabbitMQ publishes
+        # the plain-HTTP management UI alongside MQTTS), so a non-TLS port is
+        # never mistaken for a broken TLS listener. SNI is REQUIRED for this
+        # probe: Caddy (`auto_https off`, host-keyed site blocks only) has no
+        # default site and refuses a handshake that names no server, so the
+        # probe sends the row's first DNS SAN, its own name for itself (found
+        # by plan 01-03).
         local addr tls_addrs="" probe_sni=()
         local first_dns="${sans#*DNS:}"; first_dns="${first_dns%%,*}"
         case "$sans" in
@@ -432,19 +433,15 @@ verify_live() {
 
         # Every declared NAME must verify, so the check cannot depend on that
         # name's position inside the SAN extension.
-        local entry host_name verified sni
+        local entry host_name verified
         IFS=',' read -r -a _declared <<< "$sans"
         for entry in "${_declared[@]}"; do
             [ -n "$entry" ] || continue
             host_name="${entry#DNS:}"; host_name="${host_name#IP:}"
-            # SNI carries host NAMES only; an IP SAN is checked without it.
-            case "$entry" in
-                IP:*) sni=() ;;
-                *)    sni=(-servername "$host_name") ;;
-            esac
+            # The predicate derives the name or IP check from the entry itself.
             verified=0
             for addr in $tls_addrs; do
-                if tls_handshake_verified "$addr" "${PKI_DIR}/root.pem" "${sni[@]}"; then
+                if tls_handshake_verified "$addr" "${PKI_DIR}/root.pem" "$entry"; then
                     verified=1
                     ok "${name}  TLS 1.3 verified for ${host_name} on ${addr}"
                     break

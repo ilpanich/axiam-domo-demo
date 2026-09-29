@@ -67,7 +67,22 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
         echo "✗ verify-pki-stress  precondition: the idle --live-only ${row} run did not pass"
         exit 1
     fi
-    echo "  ✓ idle precondition  ${want} name(s) verified"
+    # The count must mean names: it equals the SAN entries the row declares,
+    # read from listeners.conf through the script's own expand_sans.
+    declared="$( source scripts/verify-pki.sh; set +e
+        while IFS='|' read -r n k s; do
+            case "${n# }" in ''|\#*) continue ;; esac
+            [ "$(echo "$n" | tr -d '[:space:]')" = "$row" ] || continue
+            expand_sans "$(echo "${s:-}" | tr -d '[:space:]')" | tr ',' '\n' | grep -c .
+            break
+        done < "$LISTENERS" )"
+    declared="${declared:-0}"
+    if [ "$declared" -eq 0 ] || [ "$want" -ne "$declared" ]; then
+        printf '%s\n' "$out" | sed 's/^/      /'
+        echo "✗ verify-pki-stress  precondition: ${want} name(s) verified but the ${row} row declares ${declared}"
+        exit 1
+    fi
+    echo "  ✓ idle precondition  ${want}/${declared} declared name(s) verified, each an identity check"
 
     # Negative controls, before any load. Each subshell sources the script, so
     # it calls the REAL predicates; a vacuous one must never yield a green run.
@@ -94,9 +109,18 @@ verify-pki-stress $row="rabbitmq" $iterations="50":
     control "NC1 tls_answers refuses plain HTTP on ${http_ep}" nonzero \
         tls_answers "$http_ep"
     control "NC2 tls_handshake_verified refuses a throwaway CA on ${tls_ep}" nonzero \
-        tls_handshake_verified "$tls_ep" "${tmp}/nc.pem" -servername rabbitmq
+        tls_handshake_verified "$tls_ep" "${tmp}/nc.pem" DNS:rabbitmq
     control "NC3 tls_handshake_verified accepts the organization root on ${tls_ep}" 0 \
-        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem -servername rabbitmq
+        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem DNS:rabbitmq
+    # NC9: the real predicate fails on a name, not only on a chain (CR-01).
+    control "NC9 tls_handshake_verified refuses a DNS name the certificate does not carry on ${tls_ep}" nonzero \
+        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem DNS:not-a-san.invalid
+    control "NC9 tls_handshake_verified refuses an IP the certificate does not carry on ${tls_ep}" nonzero \
+        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem IP:10.9.9.9
+    control "NC9 tls_handshake_verified accepts a declared IP on ${tls_ep}" 0 \
+        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem IP:127.0.0.1
+    control "NC9 tls_handshake_verified refuses to judge without an identity on ${tls_ep}" nonzero \
+        tls_handshake_verified "$tls_ep" .secrets/pki/root.pem rabbitmq
 
     # Branch controls: override exactly one function, then every failure branch
     # of verify_live must FAIL with its own message, and never skip.
