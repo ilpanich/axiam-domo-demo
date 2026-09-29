@@ -4,9 +4,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-This repo is at the **specification stage**: the only content is `DEFINITIONS.md`, the source of truth for what the demo must do. There is no code, build system, or test suite yet, so there are no build/lint/test commands. When components are added, record their commands here.
+Phase 1 (Foundation) is built: the offline PKI, AXIAM bootstrap and tenant model, the Caddy single origin, the Device Twin's RabbitMQ authorization backend, and a device proving the mTLS → JWT → MQTT chain end to end. Phases 2–6 (Management Platform, Twin + MQTT, simulators, portals, hardening) are not started.
 
-Read `DEFINITIONS.md` before any design or implementation work. If an implementation choice contradicts it, update the spec (with the user's agreement) rather than silently diverging.
+`DEFINITIONS.md` remains the source of truth for what the demo must do. Read it before any design or implementation work. If an implementation choice contradicts it, update the spec (with the user's agreement) rather than silently diverging.
+
+## Build & Test
+
+The task runner is [`just`](https://just.systems) (`justfile` at the root, modules under `just/`). `just` alone lists every recipe.
+
+| Command | What it does |
+|---|---|
+| `just up` | One command from a clean machine to a running stack. Ten named stages; an interrupted run resumes at the stage that failed. Ends by printing the demo card. |
+| `just preflight` | Disk, tools and versions, host-name resolution, port availability. Refuses rather than failing halfway. Runs first inside `just up`. |
+| `just demo-reset` | Wipe this project's named volumes and stage markers and rebuild, keeping the organization root (D-09, D-10). Never prunes. |
+| `cargo build --workspace --all-targets` | The Rust workspace: `crates/domo-common`, `services/device-twin`, `tools/domo-bootstrap`, `tools/domo-probe`. |
+| `cargo test --workspace` | The whole offline test suite. `cargo test -p <crate>` for one crate while iterating. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | The lint gate. Warnings are errors. |
+| `just verify` | **The fast gate.** Build, lint, tests, the secrets guard, the findings audit, the operator-documentation drift check, the topology invariants, then the phase's four success criteria as named groups (PKI, edge, database, authorization, the Twin's backend). Needs the stack up. |
+| `just phase-verify` | **The phase gate.** `reset → verify → smoke → reset → smoke` — two consecutive cycles, because a failure only on the second points at state the first left behind. Tens of minutes. |
+| `just smoke` / `just smoke-gate` | The live authorization and device-connect matrix. **`just smoke` is deliberately RED** — see below. `just smoke-gate` runs it and attributes the failures. |
+| `just images` / `just images-verify` | Build both images for amd64 and arm64; assert every image in the stack resolves the Pi's architecture, down to the ELF header of the binary inside ours. |
+
+Run `cargo test --workspace` (or `cargo test -p <crate touched>`) after code changes, and `just verify` before considering a unit of work done.
+
+**`just smoke` is red on purpose.** Two of twelve matrix cases fail against the pinned AXIAM build — `cross-tenant-ca-issuance` (DF-017) and `other-tenant-ca` (DF-025) — and both are confirmed defects in AXIAM, not in this repository. The user decided to leave the gate red until the defect is fixed upstream *and that fix is verified here*. **Do not pin the observed behaviour, mark the cases expected-failure, exclude them from the matrix, weaken any assertion, or discard the exit status.** A negative case must never be made to pass by weakening the thing it tests. `just smoke-gate` prints the full explanation; `docs/dogfooding-upstream-status.md` lists what to re-run.
+
+**Disk hygiene.** This machine has run out of space mid-session before, and the resulting errors look like compiler bugs. Run `df -h /home /` before any build; clean build outputs after (`cargo clean`, or at least `rm -rf target/debug/incremental`); never run two heavy builds in parallel below 25 GB free. `just images` and `just up` enforce the 8 GB floor themselves and `just _disk-guard` clears incremental output when it is tight.
+
+**Documentation that must stay true.** `docs/setup.md` is the first-run guide for both reference machines. `.env.example` documents the five operator-set compose keys and is gate-checked against `deploy/compose.yml`'s own `operator`/`generated` guard markers — add a key there and `just verify` fails until it is documented. Every hand-rolled AXIAM call needs an entry in `docs/dogfooding-findings.md` with a `DF-` identifier cited in its doc comment; `just verify`'s findings audit fails the gate otherwise.
 
 ## What is being built
 
