@@ -30,7 +30,7 @@
 //! whole-sequence status a human can ask for at any time, and, from Task 3, the
 //! demo card.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::state::{Marker, Stage, marker};
 
@@ -130,5 +130,90 @@ pub fn status() {
 /// Print the whole-sequence status, for `domo-bootstrap checklist`.
 pub fn run() -> Result<()> {
     status();
+    Ok(())
+}
+
+/// The demo card (D-36): everything a presenter needs, on one screen.
+///
+/// Printed at the end of a successful run AND written to
+/// `.secrets/demo-card.txt`, because the terminal it was printed to is usually
+/// not the one open when the demo starts.
+///
+/// # Mode
+///
+/// It carries the super-admin password, so it is written through
+/// `domo_common::secrets::write`, which opens at 0600 and refuses any path
+/// outside the git-ignored, docker-ignored `.secrets/` tree. Printing it to the
+/// operator's own terminal is intended — it is the presenter's credential.
+///
+/// # Shape
+///
+/// The sections are separated by `## ` headings and the seeded-user section is
+/// last and empty, so a later phase appends its users by adding lines under
+/// that heading rather than by reformatting the card (D-36).
+///
+/// `host` and `fingerprint` are supplied by `just`, which is the side that
+/// knows the operator's `.env` and holds `dist/trust/domo-root.sha256` — the
+/// file `just export-trust` has already checked against the in-use root.
+pub fn demo_card(host: &str, fingerprint: &str) -> Result<()> {
+    let raw = domo_common::secrets::read("axiam/super-admin.json").context(
+        "no .secrets/axiam/super-admin.json — the org-bootstrap stage has not run yet",
+    )?;
+    let creds: serde_json::Value =
+        serde_json::from_slice(&raw).context("super-admin.json is malformed")?;
+    let email = creds["email"].as_str().unwrap_or("<unknown>");
+    let password = creds["password"].as_str().unwrap_or("<unknown>");
+
+    let card = format!(
+        "\
+╭──────────────────────────────────────────────────────────────────────╮
+│  AXIAM Domo Demo — demo card                                         │
+╰──────────────────────────────────────────────────────────────────────╯
+
+## Where to go
+
+  Portal       https://{host}/
+  Console      https://axiam.{host}/     (the real AXIAM admin console)
+
+## Who to sign in as
+
+  super-admin  {email}
+  password     {password}
+
+  This is the organization super-admin. It is used by the bootstrap and by
+  the console; no service in the demo holds it.
+
+## The trust anchor
+
+  Root fingerprint (SHA256)
+    {fingerprint}
+
+  The same value appears on the portal's front door and in
+  dist/trust/domo-root.sha256. All three must agree — if they do not, stop.
+
+  To trust it on this machine or on a laptop you are presenting from:
+
+    just export-trust        then follow the steps it prints, or docs/trust.md
+
+## Next steps
+
+  just checklist     where this machine stands, stage by stage
+  just verify        the fast gate: build, tests, PKI, edge, database, authz
+  just smoke         the live authorization and device-connect suite
+  just demo-reset    wipe and rebuild everything except the root, between runs
+
+  If {host} does not resolve on the machine you are presenting from, publish
+  it (avahi-publish, or /etc/hosts) — `just preflight` prints the command.
+
+## Seeded users
+
+  (none yet — the Management Platform's seed arrives in Phase 2 and appends
+  its property managers, installers, concierges and residents here)
+"
+    );
+
+    print!("{card}");
+    let path = domo_common::secrets::write_string("demo-card.txt", &card)?;
+    println!("  ✓ written to {} (owner-only)", path.display());
     Ok(())
 }

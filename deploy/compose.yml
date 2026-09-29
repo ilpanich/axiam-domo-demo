@@ -251,6 +251,22 @@ services:
 
       AXIAM__AUTH__WEBAUTHN_RP_ID: "${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
       AXIAM__AUTH__WEBAUTHN_RP_ORIGIN: "https://${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
+      # The OIDC issuer identifier, and with it every endpoint URL in the
+      # discovery document.
+      #
+      # Without this, `GET /.well-known/openid-configuration` answers **500**:
+      # `jwt_issuer` defaults to the bare string `axiam`, `oauth2_issuer_url` is
+      # empty, and the handler refuses to serve a document whose issuer is not a
+      # valid URL (axiam-auth/src/config.rs: `root_issuer`). It is not a routing
+      # problem — the direct call to :8090 500s identically — and it is the
+      # document Phase 5's WASM SDK and every other OIDC client will fetch.
+      #
+      # The value is the SINGLE ORIGIN, because that is where AXIAM is served
+      # unprefixed (D-30) and therefore where a client following this document
+      # will go. Tokens carry it as `iss`; nothing in this demo pins `iss` (the
+      # Twin's verifier sets `expect_tenant_id` and `expect_audience` only), so
+      # devices reaching :8090 directly are unaffected.
+      AXIAM__AUTH__OAUTH2_ISSUER_URL: "https://${DOMO_HOST:?operator must set DOMO_HOST - see .env.example}"
       # Kept at 0 now that Caddy fronts the browser traffic, and that is a
       # deliberate choice rather than an oversight.
       #

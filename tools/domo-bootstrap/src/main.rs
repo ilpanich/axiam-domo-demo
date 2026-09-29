@@ -110,6 +110,19 @@ enum Command {
     },
     /// Print where this machine stands, one line per stage, from the markers.
     Checklist,
+    /// Print the demo card and write it to `.secrets/demo-card.txt` (D-36).
+    ///
+    /// `just` supplies the two values only the host knows: the operator's
+    /// configured host name, and the root fingerprint from the export that has
+    /// already been checked against the in-use root.
+    DemoCard {
+        /// The portal host name; the console is `axiam.<host>`.
+        #[arg(long)]
+        host: String,
+        /// The organization root's SHA-256 fingerprint.
+        #[arg(long)]
+        fingerprint: String,
+    },
     /// Apply `authz/catalog.toml` to one tenant (D-16).
     Catalog {
         /// Tenant slug to apply the catalog to.
@@ -187,6 +200,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Checklist => checklist::run(),
+        Command::DemoCard { host, fingerprint } => checklist::demo_card(&host, &fingerprint),
     }
 }
 

@@ -567,7 +567,8 @@ up:
     }
 
     do_verify() {
-      just _stage authz-verify
+      just _stage authz-verify || return 1
+      just demo-card
     }
 
     # --- the run -------------------------------------------------------------
@@ -632,6 +633,20 @@ up:
 # The ten D-34 stages and what this machine has done, read from the markers.
 checklist:
     @just _stage checklist
+
+# Print the demo card and write it to .secrets/demo-card.txt at 0600 (D-36).
+#
+# The fingerprint comes from dist/trust/domo-root.sha256 rather than from a
+# fresh `openssl` call, because `just export-trust` has already asserted that
+# file round-trips to the in-use root — reading it here keeps one source of
+# truth and makes a rotated root show up on the card with no code change.
+demo-card:
+    @set -a; if [ -f .env ]; then . ./.env; fi; set +a; \
+    test -s dist/trust/domo-root.sha256 \
+        || { echo "✗ demo-card: dist/trust/domo-root.sha256 is missing — run 'just export-trust'"; exit 1; }; \
+    just _stage demo-card \
+        --host "${DOMO_HOST:-domo.local}" \
+        --fingerprint "$(cut -d= -f2 dist/trust/domo-root.sha256 | tr -d ' ')"
 
 # --- reset (D-09, D-10) -------------------------------------------------------
 
