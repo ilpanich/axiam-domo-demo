@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 current_phase: 01
-current_phase_name: foundation
+current_phase_name: Foundation
 status: executing
-stopped_at: Completed 01-08-PLAN.md
-last_updated: "2026-09-29T15:42:04.070Z"
+stopped_at: Completed 01-09-PLAN.md
+last_updated: "2026-09-29T15:57:33.002Z"
 last_activity: 2026-09-29
-last_activity_desc: 01-08 completed — G-01-3 closed, all 8 plans executed
-state_head: 7053bf001f1233367bb107087c7334e9b6216c3c
+last_activity_desc: Phase 01 execution started
+state_head: 7cc98d8decef0e8a729e391bd9d37a0cb3d86c14
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
   percent: 0
 ---
 
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 01 (foundation) — READY TO EXECUTE
-Plan: 8 of 8 (every plan has a SUMMARY; 01-08 closed UAT gap G-01-3)
-Status: Ready for verification — `/gsd-verify-work 01`. `just verify` is green on the live stack; the phase gate (`just phase-verify`) stays known-red by explicit user decision on DF-017/DF-025 only.
-Last activity: 2026-09-29 — 01-08 completed; verify-pki judges handshakes by markers, never skips a published row, and `just verify` surfaces skips
+Phase: 01 (Foundation) — EXECUTING
+Plan: 2 of 9
+Status: Ready to execute
+Last activity: 2026-09-29 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P07 | ~65 min (this session; tasks 1-2 on 2026-09-21) | 3 tasks | 48 files |
 | Phase 01 P08 | 11min | 3 tasks | 3 files |
+| Phase 01 P09 | 10min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,8 @@ Recent decisions affecting current work:
 - [Phase 01]: G-01-3 fixed by construction: TLS verdicts come from s_client -state/summary markers, never its exit status; no retries, no client cert
 - [Phase 01]: While the stack is up, verify-pki fails (never skips) a published server row it cannot assert; stack_is_up keyed on listener services
 - [Phase 01]: just verify surfaces skip lines from passing groups; verify-pki-stress stays outside verify/phase-verify
+- [Phase 01]: 01-09: CR-01 fixed in tls_handshake_verified signature (SAN ENTRY required, builds -verify_hostname / -verify_ip); no caller can get a chain-only verdict
+- [Phase 01]: 01-09: a docker compose failure ends verify-pki at the first occurrence; the script never defaults or reads COMPOSE_PROJECT_NAME itself
 
 ### Pending Todos
 
@@ -99,6 +102,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T14:46:09.946Z
-Stopped at: Completed 01-08-PLAN.md
+Last session: 2026-09-29T15:57:32.964Z
+Stopped at: Completed 01-09-PLAN.md
 Resume file: None

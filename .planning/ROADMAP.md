@@ -32,7 +32,7 @@ The demo is built as six horizontal technical layers, in dependency order: a fou
   3. All browser-facing traffic is reachable through a single Caddy origin proxying to AXIAM, and the AXIAM resource tree (portfolio → site → common/building → apartment → device) plus the group-per-(role, resource) pattern exist and are queryable via the AXIAM API (PLAT-06, AUTHZ-01, AUTHZ-02).
   4. A single test device authenticates to AXIAM over mTLS, receives a JWT, and connects to the `domo` MQTT vhost using cert + JWT, validated end-to-end by a working RabbitMQ HTTP auth backend (MQTT-01, MQTT-02).
 
-**Plans**: 8/9 plans executed (6 waves)
+**Plans**: 9/9 plans executed (6 waves)
 Plans:
 **Wave 1**
 
@@ -59,7 +59,7 @@ Plans:
 
 **Wave 6** *(gap closure, blocked on Wave 5 completion)*
 
-- [ ] 01-09-PLAN.md — CR-01, WR-01, WR-02: verify-pki checks every declared name and IP (`-verify_hostname` / `-verify_ip`), with the real-predicate name-mismatch controls NC9 and NC10. A compose failure now fails the run instead of reading as "stack down" or "no published port" (NC11-NC13, including the verbatim `env -i` reproduction) (wave 6)
+- [x] 01-09-PLAN.md — CR-01, WR-01, WR-02: verify-pki checks every declared name and IP (`-verify_hostname` / `-verify_ip`), with the real-predicate name-mismatch controls NC9 and NC10. A compose failure now fails the run instead of reading as "stack down" or "no published port" (NC11-NC13, including the verbatim `env -i` reproduction) (wave 6)
 
 ### Phase 2: Management Platform
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 8/8 | In Progress|  |
+| 1. Foundation | 9/9 | In Progress|  |
 | 2. Management Platform | 0/TBD | Not started | - |
 | 3. Device Twin + MQTT | 0/TBD | Not started | - |
 | 4. Simulators | 0/TBD | Not started | - |
