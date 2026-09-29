@@ -12,7 +12,11 @@
 # A row whose leaf is missing is a hard failure naming that row, never a silent
 # pass.
 #
-# Usage: scripts/verify-pki.sh        (normally: `just verify-pki`)
+# Usage: scripts/verify-pki.sh                  (normally: `just verify-pki`)
+#        scripts/verify-pki.sh --live-only ROW  (only the live handshakes of one
+#                                                server row; the stack must be up)
+#        source scripts/verify-pki.sh           (loads the functions, runs nothing;
+#                                                used by `just verify-pki-stress`)
 # Env:   DOMO_HOST (default: domo.local), DOMO_LAN_IP (default: 127.0.0.1)
 #        — must match the values `gen-pki.sh` issued with, or the SAN
 #          comparison will correctly report the certificates as stale.
@@ -39,6 +43,10 @@ MAX_LEAF_DAYS=397
 MAX_LEAF_SECS=$(( MAX_LEAF_DAYS * 86400 ))
 
 MIN_FREE_GB=8
+
+# Set ONLY by `--live-only ROW` in main(). Assigned unconditionally so that an
+# inherited environment variable can never narrow the gate's coverage.
+LIVE_ONLY=""
 
 # --- output vocabulary (Pattern S-7) -----------------------------------------
 group() { printf '→ %s\n' "$*"; }
@@ -297,15 +305,17 @@ verify_live() {
     group "live listeners"
 
     if ! command -v jq >/dev/null 2>&1; then
+        [ -z "$LIVE_ONLY" ] || fail "jq is not on PATH (needed by --live-only ${LIVE_ONLY})"
         skip "jq is not on PATH"
         return 0
     fi
     if ! stack_is_up; then
+        [ -z "$LIVE_ONLY" ] || fail "stack down: --live-only ${LIVE_ONLY} asserts a live listener — run 'just up' first"
         skip "stack down"
         return 0
     fi
 
-    local name kind sans checked=0
+    local name kind sans checked=0 matched=0
     while IFS='|' read -r name kind sans; do
         case "${name# }" in ''|\#*) continue ;; esac
         name="$(echo "$name" | tr -d '[:space:]')"
@@ -313,6 +323,10 @@ verify_live() {
         sans="$(expand_sans "$(echo "${sans:-}" | tr -d '[:space:]')")"
         [ -n "$name" ] || continue
         [ "$kind" = "server" ] || continue
+        if [ -n "$LIVE_ONLY" ]; then
+            [ "$name" = "$LIVE_ONLY" ] || continue
+            matched=1
+        fi
 
         local endpoints
         endpoints="$(published_endpoints "$name" || true)"
@@ -378,16 +392,42 @@ verify_live() {
         checked=$(( checked + 1 ))
     done < "$LISTENERS"
 
+    if [ -n "$LIVE_ONLY" ]; then
+        [ "$matched" -eq 1 ] || fail "--live-only ${LIVE_ONLY}: no server row of that name in ${LISTENERS}"
+        [ "$checked" -gt 0 ] || fail "row ${LIVE_ONLY} was not live-verified"
+    fi
     [ "$checked" -gt 0 ] || skip "no published TLS listener to check"
 }
 
 # --- main --------------------------------------------------------------------
-check_disk
-command -v openssl >/dev/null 2>&1 || fail "openssl not on PATH"
+main() {
+    if [ "$#" -eq 2 ] && [ "$1" = "--live-only" ] && [ -n "$2" ]; then
+        LIVE_ONLY="$2"
+    elif [ "$#" -ne 0 ]; then
+        fail "usage: scripts/verify-pki.sh [--live-only ROW]"
+    fi
 
-verify_root
-verify_listeners
-verify_tenant_cas
-verify_live
+    check_disk
+    command -v openssl >/dev/null 2>&1 || fail "openssl not on PATH"
 
-printf '✓ verify-pki\n'
+    if [ -n "$LIVE_ONLY" ]; then
+        verify_live
+        printf '✓ verify-pki --live-only %s\n' "$LIVE_ONLY"
+        return 0
+    fi
+
+    verify_root
+    verify_listeners
+    verify_tenant_cas
+    verify_live
+
+    printf '✓ verify-pki\n'
+}
+
+# Source guard: `source scripts/verify-pki.sh` loads the functions and runs
+# nothing, so the regression guard exercises the real predicates rather than a
+# copy of them. An `if`, not an `&&` chain: under `set -e` a false `&&` test as
+# the last line would make `source` itself return non-zero in the caller.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

@@ -28,6 +28,80 @@ pki:
 verify-pki:
     @set -a; if [ -f .env ]; then . ./.env; fi; set +a; scripts/verify-pki.sh
 
+# The G-01-3 regression guard: one row's live handshakes, repeated under
+# bounded CPU contention. It must show zero failures and zero skips.
+#
+# Deliberately outside `just verify` and `just phase-verify`: it saturates every
+# core for a minute or two. Each hog runs under `timeout` and is killed on
+# exit. It never retries: every iteration counts.
+verify-pki-stress $row="rabbitmq" $iterations="50":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    set -a; if [ -f .env ]; then . ./.env; fi; set +a
+    if ! [[ "$row" =~ ^[a-z0-9-]+$ ]]; then
+        echo "✗ verify-pki-stress  row must match ^[a-z0-9-]+\$ (got '${row}')"; exit 1
+    fi
+    if ! [[ "$iterations" =~ ^[0-9]+$ ]] || [ "$iterations" -lt 1 ] || [ "$iterations" -gt 200 ]; then
+        echo "✗ verify-pki-stress  iterations must be an integer from 1 to 200 (got '${iterations}')"; exit 1
+    fi
+    marker="✓ ${row}  TLS 1.3 verified for"
+    hogs=(); tmp=""
+    cleanup() {
+        if [ "${#hogs[@]}" -gt 0 ]; then
+            kill -TERM "${hogs[@]}" 2>/dev/null; wait "${hogs[@]}" 2>/dev/null; hogs=()
+        fi
+        if [ -n "$tmp" ]; then rm -rf "$tmp"; tmp=""; fi
+    }
+    trap cleanup EXIT
+    trap 'cleanup; exit 130' INT TERM
+    echo "→ verify-pki-stress  ${row}, ${iterations} iteration(s)"
+
+    # Idle precondition: the row must pass once without load, and fixes how
+    # many names every loaded iteration must verify.
+    out="$(timeout 60 scripts/verify-pki.sh --live-only "$row" 2>&1)"; rc=$?
+    want="$(grep -cF "$marker" <<<"$out")"
+    if [ "$rc" -ne 0 ] || [ "$want" -eq 0 ]; then
+        printf '%s\n' "$out" | sed 's/^/      /'
+        echo "✗ verify-pki-stress  precondition: the idle --live-only ${row} run did not pass"
+        exit 1
+    fi
+    echo "  ✓ idle precondition  ${want} name(s) verified"
+
+    # Load: 2 × nproc busy loops, each bounded by `timeout`.
+    n=$(( 2 * $(nproc) ))
+    for _ in $(seq "$n"); do
+        timeout 600 sh -c 'while :; do :; done' &
+        hogs+=("$!")
+    done
+    sleep 1
+
+    failures=0; skips=0; first=""
+    for i in $(seq "$iterations"); do
+        out="$(timeout 60 scripts/verify-pki.sh --live-only "$row" 2>&1)"; rc=$?
+        got="$(grep -cF "$marker" <<<"$out")"
+        if [ "$rc" -ne 0 ] || [ "$got" -ne "$want" ]; then
+            failures=$(( failures + 1 ))
+            [ -n "$first" ] || first="iteration ${i}: exit ${rc}, ${got}/${want} verified"$'\n'"${out}"
+        fi
+        if grep -qF '→ skipped' <<<"$out"; then skips=$(( skips + 1 )); fi
+    done
+
+    alive=0
+    for p in "${hogs[@]}"; do if kill -0 "$p" 2>/dev/null; then alive=1; fi; done
+    load="$(cut -d' ' -f1 /proc/loadavg)"
+    if [ "$alive" -eq 0 ]; then
+        echo "✗ verify-pki-stress  the CPU load ended before the last iteration; nothing was proved under contention"
+        exit 1
+    fi
+    summary="${row}: $(( iterations - failures ))/${iterations} under ${n} CPU hogs (loadavg ${load}), ${failures} failures, ${skips} skips"
+    if [ "$failures" -eq 0 ] && [ "$skips" -eq 0 ]; then
+        echo "✓ verify-pki-stress  ${summary}"
+    else
+        echo "✗ verify-pki-stress  ${summary}"
+        if [ -n "$first" ]; then printf '%s\n' "$first" | sed 's/^/      /'; fi
+        exit 1
+    fi
+
 # --- secrets guards ----------------------------------------------------------
 
 # Three independent layers between the root key and a commit or an image layer:
