@@ -46,11 +46,22 @@ set -uo pipefail
 MIN_FREE_GB="${DOMO_MIN_FREE_GB:-8}"
 DOMO_HOST="${DOMO_HOST:-domo.local}"
 
-# The ports D-05 allows out of the Docker network, and nothing else:
-#   443   Caddy, the single browser-facing origin
-#   8090  AXIAM's own TLS listener (devices reach it directly, D-05)
-#   8883  RabbitMQ MQTTS
-PUBLISHED_PORTS="443 8090 8883"
+# Every port `deploy/compose.yml` publishes to the host. The list is not "the
+# LAN-facing ports" — it is "the ports a bind can fail on", which is a strictly
+# larger set, and the difference is what this check exists to catch.
+#
+#   443    Caddy, the single browser-facing origin      (LAN + loopback, D-05)
+#   8090   AXIAM's own TLS listener, devices reach it directly (LAN + loopback, D-05)
+#   8883   RabbitMQ MQTTS                               (LAN, D-05)
+#   15672  RabbitMQ's management API                    (loopback only)
+#
+# 15672 was missing until plan 01-07, and its absence was not theoretical: the
+# SIBLING AXIAM checkout's own development stack publishes 15672 on 0.0.0.0,
+# which occupies our loopback bind too. Preflight passed, `just up` then died
+# inside `docker compose up` with a bind error — precisely the "fails halfway"
+# this script exists to prevent. A loopback-only publication is still a
+# publication.
+PUBLISHED_PORTS="443 8090 8883 15672"
 
 fail_count=0
 
@@ -204,10 +215,29 @@ check_host() {
         return
     fi
 
-    local p
+    local p holder
     for p in $PUBLISHED_PORTS; do
         if ss -ltn 2>/dev/null | grep -qE "[:.]${p}[[:space:]]"; then
-            bad "port ${p} is already in use by another process — stop it, or the stack will fail to publish. (If it is a previous run of this demo, 'just down' first.)"
+            bad "port ${p} is already in use — the stack will fail to publish it."
+            # Naming the holder is the difference between a refusal a reader can
+            # act on and one they have to investigate. A container is by far the
+            # likeliest holder here, and the likeliest container is the SIBLING
+            # AXIAM checkout's own development stack, which is not ours to stop.
+            holder="$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
+                      | grep -E "[:.]${p}->" | cut -f1 | paste -sd', ' -)"
+            if [ -n "$holder" ]; then
+                note "    held by container: ${holder}"
+                case "$holder" in
+                    axiam-*)
+                        note "    that is the SIBLING AXIAM checkout's development stack, not this demo's."
+                        note "    Stop it there (its own 'just'/compose), or free the port — do not 'docker stop' it blindly;" ;;
+                    *)
+                        note "    if it is a previous run of THIS demo, 'just down' first;" ;;
+                esac
+                note "    its volumes are not ours to touch."
+            else
+                note "    no container publishes it — a host process holds it. 'ss -ltnp' names which."
+            fi
         else
             ok "port ${p} is free"
         fi
