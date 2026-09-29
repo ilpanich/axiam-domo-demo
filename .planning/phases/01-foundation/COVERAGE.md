@@ -120,8 +120,8 @@ Phase 1 integrates four external surfaces:
 | `allow <tags>` response form (broker tags) | OPT-OUT | No device is ever a broker administrator/monitor; the backend returns bare `allow` so no tag is ever granted. |
 | `deny <reason>` response form | INTEGRATE | The reason string is what makes a denied CONNECT diagnosable in `just smoke`. |
 | `auth_http.http_method = get` | OPT-OUT | GET puts the JWT in the URL, which RabbitMQ debug-logs. `post` is mandatory here (ASVS V7). |
-| `rabbitmq_auth_backend_oauth2` | OPT-OUT | AXIAM's `scope` claim is not RabbitMQ permission grammar and is absent entirely on the mTLS device-login path; making it work would mean reconfiguring AXIAM's OAuth2 scope issuance — forbidden by the project's out-of-scope list. |
-| `mqtt.ssl_cert_login` | OPT-OUT | Under cert login the client must not supply username/password, which is exactly the JWT-as-password flow MQTT-02 requires. `ssl_cert_client_id_from = distinguished_name` gives the cert binding without it. |
+| `rabbitmq_auth_backend_oauth2` | OPT-OUT | AXIAM's `scope` claim is not RabbitMQ permission grammar and is absent on the mTLS device-login path; fixing that means reconfiguring AXIAM's scope issuance, which is out of scope. |
+| `mqtt.ssl_cert_login` | OPT-OUT | Cert login forbids a client username/password, which is the JWT-as-password flow MQTT-02 requires. `ssl_cert_client_id_from = distinguished_name` gives the cert binding without it. |
 
 ---
 
