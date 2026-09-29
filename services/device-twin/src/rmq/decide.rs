@@ -148,6 +148,21 @@ impl Session {
     }
 }
 
+/// The certificate binding, applied to a `client_id` the broker volunteers on
+/// a token-less check (vhost, resource — RabbitMQ 4.3.6, MQTT).
+///
+/// Present: it must be `CN=<username>`, exactly as CONNECT required, so the
+/// extra evidence can only narrow access. Absent: nothing to hold, and the
+/// session these checks also require was itself bound at CONNECT.
+fn client_id_binding(username: &str, client_id: Option<&str>) -> Result<(), DenyReason> {
+    match client_id {
+        Some(cid) if cid != expected_client_id(username) => {
+            Err(DenyReason::ClientIdNotBoundToUsername)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Resolve a cached session to an `Allow`, or to the reason it cannot serve.
 fn live_session(session: Option<&Session>, now: i64) -> Result<&Session, DenyReason> {
     match session {
@@ -243,14 +258,27 @@ pub fn decide_user_subject(username: &str, token_sub: Option<&str>) -> Decision 
 
 /// Decide a virtual-host check. Only `domo`, and only for a live session.
 ///
-/// A pure cache lookup: present, unexpired, and naming `domo`. Every other
-/// outcome — a miss included — denies. This endpoint receives no token and has
-/// no other evidence, so failing open here would grant every subsequent
-/// operation for free (T-05-05).
+/// A cache lookup: present, unexpired, and naming `domo`. Every other outcome —
+/// a miss included — denies. This endpoint receives no token, so failing open
+/// here would grant every subsequent operation for free (T-05-05).
+///
+/// `client_id` is the one piece of extra evidence the broker does send here
+/// (RabbitMQ 4.3.6, MQTT). When present it must carry the same certificate
+/// binding the CONNECT decision enforced, so it can only ever narrow access.
+/// When absent the session is enough: it was itself bound at CONNECT.
 #[must_use]
-pub fn decide_vhost(vhost: &str, session: Option<&Session>, now: i64) -> Decision {
+pub fn decide_vhost(
+    vhost: &str,
+    username: &str,
+    client_id: Option<&str>,
+    session: Option<&Session>,
+    now: i64,
+) -> Decision {
     if vhost != DOMO_VHOST {
         return Decision::Deny(DenyReason::VhostNotDomo);
+    }
+    if let Err(reason) = client_id_binding(username, client_id) {
+        return Decision::Deny(reason);
     }
     match live_session(session, now) {
         Ok(_) => Decision::Allow,
@@ -268,6 +296,7 @@ pub fn decide_vhost(vhost: &str, session: Option<&Session>, now: i64) -> Decisio
 pub fn decide_resource(
     vhost: &str,
     username: &str,
+    client_id: Option<&str>,
     resource: &str,
     name: &str,
     session: Option<&Session>,
@@ -275,6 +304,9 @@ pub fn decide_resource(
 ) -> Decision {
     if vhost != DOMO_VHOST {
         return Decision::Deny(DenyReason::VhostNotDomo);
+    }
+    if let Err(reason) = client_id_binding(username, client_id) {
+        return Decision::Deny(reason);
     }
     if let Err(reason) = live_session(session, now) {
         return Decision::Deny(reason);

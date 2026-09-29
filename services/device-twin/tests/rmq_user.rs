@@ -98,7 +98,7 @@ fn other_vhosts_are_never_reachable() {
         Decision::Deny(DenyReason::VhostNotDomo)
     );
     assert_eq!(
-        decide_vhost("/", Some(&session()), NOW),
+        decide_vhost("/", SA, None, Some(&session()), NOW),
         Decision::Deny(DenyReason::VhostNotDomo)
     );
 }
@@ -106,17 +106,23 @@ fn other_vhosts_are_never_reachable() {
 #[test]
 fn the_vhost_decision_is_a_pure_cache_lookup() {
     let s = session();
-    assert_eq!(decide_vhost("domo", Some(&s), NOW), Decision::Allow);
     assert_eq!(
-        decide_vhost("domo", None, NOW),
+        decide_vhost("domo", SA, None, Some(&s), NOW),
+        Decision::Allow
+    );
+    assert_eq!(
+        decide_vhost("domo", SA, None, None, NOW),
         Decision::Deny(DenyReason::NoSession)
     );
     // One second past the token's own expiry is one second too late.
     assert_eq!(
-        decide_vhost("domo", Some(&s), s.exp),
+        decide_vhost("domo", SA, None, Some(&s), s.exp),
         Decision::Deny(DenyReason::SessionExpired)
     );
-    assert_eq!(decide_vhost("domo", Some(&s), s.exp - 1), Decision::Allow);
+    assert_eq!(
+        decide_vhost("domo", SA, None, Some(&s), s.exp - 1),
+        Decision::Allow
+    );
 }
 
 #[test]
@@ -210,6 +216,117 @@ async fn an_unexpected_field_is_rejected_by_the_strict_form() {
         .await;
     assert_eq!(status, 200, "a parse failure is a decision, not a 400");
     assert_eq!(body, "deny");
+}
+
+/// RabbitMQ 4.3.6 sends `client_id` on the vhost check for an MQTT connection.
+/// Found by plan 01-07's phase gate: before this, the strict form rejected the
+/// parameter and every device was refused at the vhost with CONNACK
+/// NotAuthorized, the positive case included.
+///
+/// Accepted, and used: when present it must carry the same certificate binding
+/// the CONNECT decision enforced, so the extra evidence can only narrow access.
+#[actix_web::test]
+async fn the_vhost_check_accepts_the_brokers_client_id_and_holds_it_to_the_binding() {
+    let twin = Twin::offline(&[(LAKESIDE_ID, LAKESIDE_SLUG)]);
+    twin.sessions.insert(SA, session());
+    let bound = cn(SA);
+
+    let (status, body) = twin
+        .post(
+            "/rmq/vhost",
+            &[
+                ("username", SA),
+                ("vhost", "domo"),
+                ("client_id", &bound),
+                ("ip", "172.18.0.9"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "allow"),
+        "the live broker's exact shape"
+    );
+
+    let other = cn(OTHER_SA);
+    let (status, body) = twin
+        .post(
+            "/rmq/vhost",
+            &[("username", SA), ("vhost", "domo"), ("client_id", &other)],
+        )
+        .await;
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "deny"),
+        "a client_id bound to another account"
+    );
+
+    // Unknown fields are still refused: only the parameter the broker is known
+    // to send was admitted, not strictness as a whole.
+    let (_, body) = twin
+        .post(
+            "/rmq/vhost",
+            &[
+                ("username", SA),
+                ("vhost", "domo"),
+                ("client_id", &bound),
+                ("surprise", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(body, "deny");
+}
+
+/// The resource check carries `client_id` on RabbitMQ 4.3.6 as well — the
+/// second layer plan 01-07's phase gate hit once the vhost check passed. Same
+/// rule: accepted by name, held to the certificate binding when present.
+#[actix_web::test]
+async fn the_resource_check_accepts_the_brokers_client_id_and_holds_it_to_the_binding() {
+    let twin = Twin::offline(&[(LAKESIDE_ID, LAKESIDE_SLUG)]);
+    twin.sessions.insert(SA, session());
+    let bound = cn(SA);
+    let other = cn(OTHER_SA);
+
+    let post = |cid: String| {
+        let twin = &twin;
+        async move {
+            twin.post(
+                "/rmq/resource",
+                &[
+                    ("username", SA),
+                    ("vhost", "domo"),
+                    ("resource", "exchange"),
+                    ("name", "amq.topic"),
+                    ("permission", "write"),
+                    ("client_id", &cid),
+                ],
+            )
+            .await
+            .1
+        }
+    };
+    assert_eq!(post(bound).await, "allow", "the live broker's exact shape");
+    assert_eq!(post(other).await, "deny", "a client_id bound to another account");
+}
+
+#[test]
+fn the_vhost_decision_holds_a_present_client_id_to_the_certificate_binding() {
+    let s = session();
+    assert_eq!(
+        decide_vhost("domo", SA, Some(&cn(SA)), Some(&s), NOW),
+        Decision::Allow
+    );
+    assert_eq!(
+        decide_vhost("domo", SA, Some(SA), Some(&s), NOW),
+        Decision::Deny(DenyReason::ClientIdNotBoundToUsername),
+        "the bare user name is not the certificate subject"
+    );
+    // Absent is fine: the broker omits it in some configurations, and the
+    // session this lookup requires was itself bound at CONNECT.
+    assert_eq!(
+        decide_vhost("domo", SA, None, Some(&s), NOW),
+        Decision::Allow
+    );
 }
 
 #[actix_web::test]
@@ -309,7 +426,10 @@ async fn every_endpoint_answers_200_for_both_outcomes() {
         ("vhost", "domo"),
         ("client_id", &cid),
     ];
-    assert_eq!(twin.post("/rmq/user", allow_user).await, (200, "allow".into()));
+    assert_eq!(
+        twin.post("/rmq/user", allow_user).await,
+        (200, "allow".into())
+    );
 
     /// endpoint, form fields, expected body.
     type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, &'a str);
@@ -393,9 +513,7 @@ async fn no_log_record_contains_the_password() {
     let axiam = FakeAxiam::start().await;
     // A structurally valid token whose subject names somebody else, so the
     // request travels the whole path — parse, verify, refuse — while logging.
-    let token = axiam
-        .key
-        .sign(&TokenClaims::device(OTHER_SA, LAKESIDE_ID));
+    let token = axiam.key.sign(&TokenClaims::device(OTHER_SA, LAKESIDE_ID));
     let twin = Twin::new(registry(&axiam.url(), &[(LAKESIDE_ID, LAKESIDE_SLUG)]));
     let cid = cn(SA);
 

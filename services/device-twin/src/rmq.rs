@@ -180,6 +180,8 @@ async fn rmq_vhost(
     let r = form.into_inner();
     reply(decide_vhost(
         &r.vhost,
+        &r.username,
+        r.client_id.as_deref(),
         st.sessions.get(&r.username).as_ref(),
         now_unix(),
     ))
@@ -197,6 +199,7 @@ async fn rmq_resource(
     reply(decide_resource(
         &r.vhost,
         &r.username,
+        r.client_id.as_deref(),
         &r.resource,
         &r.name,
         st.sessions.get(&r.username).as_ref(),

@@ -35,7 +35,7 @@ fn the_shared_topic_exchange_is_reachable_for_read_and_write() {
     let s = session();
     for permission in ["read", "write", "configure"] {
         assert_eq!(
-            decide_resource("domo", SA, "exchange", SHARED_TOPIC_EXCHANGE, Some(&s), NOW),
+            decide_resource("domo", SA, None, "exchange", SHARED_TOPIC_EXCHANGE, Some(&s), NOW),
             Decision::Allow,
             "the shared exchange must be reachable to {permission}"
         );
@@ -47,7 +47,7 @@ fn another_exchange_is_not_reachable() {
     let s = session();
     for name in ["amq.fanout", "amq.direct", "domo.private", ""] {
         assert_eq!(
-            decide_resource("domo", SA, "exchange", name, Some(&s), NOW),
+            decide_resource("domo", SA, None, "exchange", name, Some(&s), NOW),
             Decision::Deny(DenyReason::ResourceNotOwned),
             "{name:?} is not the shared topic exchange"
         );
@@ -63,7 +63,7 @@ fn a_device_owns_exactly_the_three_derived_queue_forms() {
         format!("mqtt-will-CN={SA}"),
     ] {
         assert_eq!(
-            decide_resource("domo", SA, "queue", &name, Some(&s), NOW),
+            decide_resource("domo", SA, None, "queue", &name, Some(&s), NOW),
             Decision::Allow,
             "{name} is derived from this device's own client identifier"
         );
@@ -79,7 +79,7 @@ fn a_queue_derived_from_another_client_identifier_is_denied() {
         format!("mqtt-will-CN={OTHER_SA}"),
     ] {
         assert_eq!(
-            decide_resource("domo", SA, "queue", &name, Some(&s), NOW),
+            decide_resource("domo", SA, None, "queue", &name, Some(&s), NOW),
             Decision::Deny(DenyReason::ResourceNotOwned),
             "{name} belongs to another device"
         );
@@ -97,7 +97,7 @@ fn a_queue_matching_none_of_the_derived_forms_is_denied() {
         "amq.gen-whatever".to_string(),
     ] {
         assert_eq!(
-            decide_resource("domo", SA, "queue", &name, Some(&s), NOW),
+            decide_resource("domo", SA, None, "queue", &name, Some(&s), NOW),
             Decision::Deny(DenyReason::ResourceNotOwned),
             "{name} is not one of the broker's three derived forms"
         );
@@ -108,7 +108,7 @@ fn a_queue_matching_none_of_the_derived_forms_is_denied() {
 fn the_resource_endpoint_checks_the_virtual_host_before_any_name_matching() {
     let s = session();
     assert_eq!(
-        decide_resource("/", SA, "exchange", SHARED_TOPIC_EXCHANGE, Some(&s), NOW),
+        decide_resource("/", SA, None, "exchange", SHARED_TOPIC_EXCHANGE, Some(&s), NOW),
         Decision::Deny(DenyReason::VhostNotDomo)
     );
 }

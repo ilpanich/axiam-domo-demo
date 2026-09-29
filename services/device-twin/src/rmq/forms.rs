@@ -45,6 +45,13 @@ pub struct VhostReq {
     pub ip: Option<String>,
     #[serde(default)]
     pub tags: Option<String>,
+    /// Sent by RabbitMQ 4.3.6 on the vhost check of an MQTT connection. The
+    /// 01-05 parameter list predates it, so the strict form refused every
+    /// device at the vhost — positive case included — until plan 01-07's phase
+    /// gate caught it. Admitted by name only: strictness stays for the rest.
+    /// When present it is held to the certificate binding (see `decide_vhost`).
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 /// `POST /rmq/resource`.
@@ -62,6 +69,10 @@ pub struct ResourceReq {
     pub permission: String,
     #[serde(default)]
     pub tags: Option<String>,
+    /// Sent by RabbitMQ 4.3.6 here too, for the same reason as on `VhostReq`.
+    /// Held to the certificate binding when present (see `decide_resource`).
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 /// `POST /rmq/topic`.
